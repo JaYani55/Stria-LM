@@ -1,0 +1,5 @@
+- API is for creating promptfiles, interaction via console for actually training the bot (Server Problems, and it's not needed)
+- Test prompting also over Console
+- API endpoint for serving answers. 
+- Add custom data structures to specific project scriptfiles.
+- Query StriaLM data as MCP - Query for context retrieval for LLM applications

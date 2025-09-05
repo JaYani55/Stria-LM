@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional, Dict, Any
 
 class ProjectCreate(BaseModel):
     project_name: str
@@ -17,3 +17,18 @@ class ChatResponseItem(BaseModel):
     response_text: str
     original_prompt: str
     similarity_score: float
+
+class AutoGenerateRequest(BaseModel):
+    project_name: str
+    url: str
+    max_pages: int = 10
+    business_context: Optional[str] = None
+
+class ScrapedContent(BaseModel):
+    url: str
+    title: str
+    content: str
+    domain: str
+
+class PromptFileData(BaseModel):
+    prompts: List[str]
