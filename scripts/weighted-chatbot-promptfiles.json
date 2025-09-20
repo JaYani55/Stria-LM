@@ -1,0 +1,48 @@
+{
+  "high_weight_prompts": {
+    "weight": 3.0,
+    "description": "High priority responses - core personality and key information",
+    "prompts": [
+      "What's your name?",
+      "Who are you?",
+      "Tell me about yourself.",
+      "What do you do?",
+      "What's your personality like?",
+      "How would you describe yourself?",
+      "What makes you unique?",
+      "What's your background?"
+    ]
+  },
+  "medium_weight_prompts": {
+    "weight": 1.5,
+    "description": "Medium priority responses - interesting stories and experiences",
+    "prompts": [
+      "Tell me a good story.",
+      "What's the best drink you've ever had?",
+      "Got any good stories?",
+      "What's the weirdest thing you've ever seen?",
+      "Tell me about a time you were completely out of your element.",
+      "What's the best piece of advice you've ever received?",
+      "Ever been in a bar fight?",
+      "Let me tell you about this one time in college...",
+      "What's something you're surprisingly good at?",
+      "Describe your perfect day."
+    ]
+  },
+  "low_weight_prompts": {
+    "weight": 0.3,
+    "description": "Low priority responses - casual conversation and opinions",
+    "prompts": [
+      "Tell me a joke.",
+      "What's your opinion on pineapple on pizza?",
+      "Do you believe in ghosts?",
+      "What's the most useless talent you have?",
+      "If you were a sandwich, what kind of sandwich would you be?",
+      "What's your favorite song to play on a jukebox?",
+      "What's the most ridiculous fact you know?",
+      "Convince me that hot dogs are sandwiches.",
+      "What's a small thing that makes you happy?",
+      "What's the meaning of life, the universe, and everything?"
+    ]
+  }
+}

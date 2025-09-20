@@ -8,6 +8,7 @@ class ProjectCreate(BaseModel):
 class AddData(BaseModel):
     prompt: str
     response: str
+    weight: float = 1.0
 
 class ChatRequest(BaseModel):
     prompt: str
@@ -17,6 +18,8 @@ class ChatResponseItem(BaseModel):
     response_text: str
     original_prompt: str
     similarity_score: float
+    weight: Optional[float] = None
+    weighted_similarity: Optional[float] = None
 
 class AutoGenerateRequest(BaseModel):
     project_name: str

@@ -3,6 +3,9 @@ from typing import List
 import os
 import json
 
+# Enable weights for testing
+os.environ["ENABLE_WEIGHTS"] = "true"
+
 from . import models
 from . import database
 from . import embedding
@@ -14,7 +17,7 @@ from .Agents.answer_agent_universal import generate_answers_for_business
 app = FastAPI(
     title="Stria-LM",
     description="A framework for portable, file-based retrieval models.",
-    version="0.1.0",
+    version="0.1.1",
 )
 
 @app.on_event("startup")
@@ -67,7 +70,7 @@ def add_data_to_project(project_name: str, data: models.AddData):
         model_name = metadata.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
         prompt_embedding = embedding.generate_embedding(data.prompt, model_name)
         
-        database.add_qa_pair(project_name, data.prompt, data.response, prompt_embedding, config.PROJECTS_DIR)
+        database.add_qa_pair(project_name, data.prompt, data.response, prompt_embedding, config.PROJECTS_DIR, data.weight)
         
         return {"message": "Data added successfully."}
     except Exception as e:

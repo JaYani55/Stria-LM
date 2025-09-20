@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import numpy as np
 import sqlite_vec
+from .config import ENABLE_WEIGHTS
 
 def get_db_connection(db_path: Path) -> sqlite3.Connection:
     """Establishes a database connection and loads the vec extension."""
@@ -53,7 +54,8 @@ def init_db(project_name: str, embedding_model: str, vector_dim: int, projects_d
         CREATE TABLE IF NOT EXISTS qa_text (
             id INTEGER PRIMARY KEY,
             prompt_text TEXT NOT NULL,
-            response_text TEXT NOT NULL
+            response_text TEXT NOT NULL,
+            weight REAL DEFAULT 1.0
         )
         """)
         
@@ -81,13 +83,16 @@ def init_db(project_name: str, embedding_model: str, vector_dim: int, projects_d
         
         conn.commit()
 
-def add_qa_pair(project_name: str, prompt: str, response: str, embedding: np.ndarray, projects_dir: Path):
+def add_qa_pair(project_name: str, prompt: str, response: str, embedding: np.ndarray, projects_dir: Path, weight: float = 1.0):
     db_path = get_db_path(project_name, projects_dir)
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
         
-        # Insert text data and get the rowid
-        cursor.execute("INSERT INTO qa_text (prompt_text, response_text) VALUES (?, ?)", (prompt, response))
+        # Insert text data with weight if enabled, otherwise use default
+        if ENABLE_WEIGHTS:
+            cursor.execute("INSERT INTO qa_text (prompt_text, response_text, weight) VALUES (?, ?, ?)", (prompt, response, weight))
+        else:
+            cursor.execute("INSERT INTO qa_text (prompt_text, response_text) VALUES (?, ?)", (prompt, response))
         rowid = cursor.lastrowid
 
         # Insert the embedding into the vec table with the same rowid
@@ -105,28 +110,57 @@ def find_similar_prompts(project_name: str, query_embedding: np.ndarray, top_k: 
         # For querying with MATCH, the vector needs to be a JSON string
         query_embedding_json = json.dumps(query_embedding.tolist())
 
-        # Query for similar prompts using the MATCH operator and the 'k' parameter
-        query = """
-        SELECT
-            t.response_text,
-            t.prompt_text,
-            v.distance
-        FROM qa_pairs v
-        JOIN qa_text t ON v.rowid = t.id
-        WHERE v.prompt_embedding MATCH ? AND k = ?
-        """
-        
-        cursor.execute(query, (query_embedding_json, top_k))
-        results = cursor.fetchall()
-        
-        return [
-            {
-                "response_text": row[0],
-                "original_prompt": row[1],
-                "similarity_score": 1 - row[2] # vec distance is L2, 1-dist is a simple similarity metric
-            }
-            for row in results
-        ]
+        if ENABLE_WEIGHTS:
+            # Query with weight-based ranking when weights are enabled
+            query = """
+            SELECT
+                t.response_text,
+                t.prompt_text,
+                v.distance,
+                t.weight,
+                (1 - v.distance) * t.weight as weighted_similarity
+            FROM qa_pairs v
+            JOIN qa_text t ON v.rowid = t.id
+            WHERE v.prompt_embedding MATCH ? AND k = ?
+            ORDER BY weighted_similarity DESC
+            """
+            
+            cursor.execute(query, (query_embedding_json, top_k))
+            results = cursor.fetchall()
+            
+            return [
+                {
+                    "response_text": row[0],
+                    "original_prompt": row[1],
+                    "similarity_score": 1 - row[2],
+                    "weight": row[3],
+                    "weighted_similarity": row[4]
+                }
+                for row in results
+            ]
+        else:
+            # Original query without weights when weights are disabled
+            query = """
+            SELECT
+                t.response_text,
+                t.prompt_text,
+                v.distance
+            FROM qa_pairs v
+            JOIN qa_text t ON v.rowid = t.id
+            WHERE v.prompt_embedding MATCH ? AND k = ?
+            """
+            
+            cursor.execute(query, (query_embedding_json, top_k))
+            results = cursor.fetchall()
+            
+            return [
+                {
+                    "response_text": row[0],
+                    "original_prompt": row[1],
+                    "similarity_score": 1 - row[2] # vec distance is L2, 1-dist is a simple similarity metric
+                }
+                for row in results
+            ]
 
 def get_project_metadata(project_name: str, projects_dir: Path):
     db_path = get_db_path(project_name, projects_dir)
