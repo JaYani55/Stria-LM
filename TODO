@@ -4,3 +4,4 @@
 - Add multiple actors to a single DB Projectfile
 - Add function calling capability - execute script or API call on retrieval
 - Add markdown-ui elements to retrieval
+- Optional emotion marker to response for visual responses.n  

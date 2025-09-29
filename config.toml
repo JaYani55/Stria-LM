@@ -1,0 +1,13 @@
+[embedding]
+default_model = "local_default"
+
+[embedding.models]
+[embedding.models.local_default]
+category = "Local"
+model = "sentence-transformers/all-MiniLM-L6-v2"
+
+[embedding.models.openai_default]
+category = "OpenAI API"
+model = "text-embedding-ada-002"
+base_url = "https://api.openai.com/v1"
+api_key = "YOUR_OPENAI_API_KEY" # Replace with your actual key or use environment variables
