@@ -1,7 +1,15 @@
+inference_model_path = "C:/Users/Janal/.lmstudio/models/Jinx-org/Jinx-gpt-oss-20b-GGUF/jinx-gpt-oss-20b-mxfp4.gguf"
+
 [embedding]
 default_model = "local_default"
 
-[embedding.models]
+[inference]
+default_host = "127.0.0.1"
+default_port = 8008
+gguf_extensions = [ "*.gguf",]
+inference_model_name = "default-model"
+inference_model_path = ""
+
 [embedding.models.local_default]
 category = "Local"
 model = "sentence-transformers/all-MiniLM-L6-v2"
@@ -10,4 +18,4 @@ model = "sentence-transformers/all-MiniLM-L6-v2"
 category = "OpenAI API"
 model = "text-embedding-ada-002"
 base_url = "https://api.openai.com/v1"
-api_key = "YOUR_OPENAI_API_KEY" # Replace with your actual key or use environment variables
+api_key = "YOUR_OPENAI_API_KEY"
