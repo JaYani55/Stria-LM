@@ -40,8 +40,7 @@ def create_project(project: models.ProjectCreate):
 
     try:
         # Get vector dimension from the model
-        temp_model = embedding.get_embedding_model(project.embedding_model)
-        vector_dim = temp_model.get_sentence_embedding_dimension()
+        vector_dim = embedding.get_vector_dimension(project.embedding_model)
         
         database.init_db(project.project_name, project.embedding_model, vector_dim, config.PROJECTS_DIR)
         return {"message": f"Project '{project.project_name}' created successfully."}
