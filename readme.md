@@ -156,3 +156,10 @@ The project includes a suite of tests to verify the API's functionality. To run 
 pytest
 ```
 This will automatically discover and run the tests in the `tests/` directory.
+
+## GUI utilities
+
+Two Tkinter-based desktop helpers are included for convenience:
+
+- `run_gui_inferenceServer.py` loads a local GGUF model and runs the FastAPI inference server with start/stop controls.
+- `run_gui_project_manager.py` lets you browse the SQLite-Vec project databases. When launched it lists the available projects in the `projects/` folder, opens the selected database, and shows the tables and their contents for quick inspection (first 200 rows per table).
