@@ -87,7 +87,7 @@ class AnswerAgent:
             return self._get_fallback_answer(question)
     
     def generate_answers_for_prompts(self, prompts: List[str], business_content: List[Dict], 
-                                   business_context: str = None) -> List[Dict]:
+                                   business_context: str = None, default_weight: float = 1.0) -> List[Dict]:
         """
         Generate answers for a list of prompts
         
@@ -95,9 +95,10 @@ class AnswerAgent:
             prompts: List of questions/prompts
             business_content: Scraped business content
             business_context: Optional business context
+            default_weight: The default weight to assign to each generated Q&A pair
         
         Returns:
-            List of dictionaries with prompt and response pairs
+            List of dictionaries with prompt, response, and weight
         """
         results = []
         
@@ -108,13 +109,15 @@ class AnswerAgent:
                 answer = self.generate_answer(prompt, business_content, business_context)
                 results.append({
                     "prompt": prompt,
-                    "response": answer
+                    "response": answer,
+                    "weight": default_weight
                 })
             except Exception as e:
                 logger.error(f"Failed to generate answer for prompt '{prompt}': {e}")
                 results.append({
                     "prompt": prompt,
-                    "response": self._get_fallback_answer(prompt)
+                    "response": self._get_fallback_answer(prompt),
+                    "weight": default_weight
                 })
         
         return results
@@ -146,7 +149,7 @@ class AnswerAgent:
             return fallback_responses["default"]
 
 def generate_answers_for_business(prompts: List[str], business_content: List[Dict], 
-                                business_context: str = None) -> List[Dict]:
+                                business_context: str = None, default_weight: float = 1.0) -> List[Dict]:
     """
     Main function to generate answers for business prompts
     
@@ -154,13 +157,14 @@ def generate_answers_for_business(prompts: List[str], business_content: List[Dic
         prompts: List of questions/prompts
         business_content: Scraped business content
         business_context: Optional business context
+        default_weight: The default weight for the generated Q&A pairs
     
     Returns:
-        List of prompt-response pairs
+        List of prompt-response pairs with weights
     """
     try:
         agent = AnswerAgent()
-        return agent.generate_answers_for_prompts(prompts, business_content, business_context)
+        return agent.generate_answers_for_prompts(prompts, business_content, business_context, default_weight)
     except Exception as e:
         logger.error(f"Failed to initialize AnswerAgent: {e}")
         # Return fallback responses
@@ -168,7 +172,8 @@ def generate_answers_for_business(prompts: List[str], business_content: List[Dic
         return [
             {
                 "prompt": prompt,
-                "response": fallback_agent._get_fallback_answer(prompt)
+                "response": fallback_agent._get_fallback_answer(prompt),
+                "weight": default_weight
             }
             for prompt in prompts
         ]

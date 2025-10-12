@@ -140,7 +140,8 @@ def auto_generate_lm_content(request: models.AutoGenerateRequest):
         qa_pairs = generate_answers_for_business(
             prompt_file_data["prompts"], 
             scraped_data, 
-            request.business_context
+            request.business_context,
+            request.default_weight
         )
         
         # Step 6: Add Q&A pairs to the main knowledge base
@@ -155,7 +156,8 @@ def auto_generate_lm_content(request: models.AutoGenerateRequest):
                     qa_pair["prompt"], 
                     qa_pair["response"], 
                     prompt_embedding, 
-                    config.PROJECTS_DIR
+                    config.PROJECTS_DIR,
+                    qa_pair.get("weight", 1.0)
                 )
                 added_count += 1
             except Exception as e:

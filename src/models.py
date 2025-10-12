@@ -15,6 +15,7 @@ class ChatRequest(BaseModel):
     top_k: int = 3
 
 class ChatResponseItem(BaseModel):
+    id: int
     response_text: str
     original_prompt: str
     similarity_score: float
@@ -26,6 +27,7 @@ class AutoGenerateRequest(BaseModel):
     url: str
     max_pages: int = 10
     business_context: Optional[str] = None
+    default_weight: float = 1.0
 
 class ScrapedContent(BaseModel):
     url: str

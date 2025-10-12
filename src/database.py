@@ -115,27 +115,29 @@ def find_similar_prompts(project_name: str, query_embedding: np.ndarray, top_k: 
             # Query with weight-based ranking when weights are enabled
             query = """
             SELECT
+                t.id,
                 t.response_text,
                 t.prompt_text,
                 v.distance,
-                t.weight,
-                (1 - v.distance) * t.weight as weighted_similarity
+                COALESCE(t.weight, 1.0) AS weight,
+                (1 - v.distance) * COALESCE(t.weight, 1.0) AS weighted_similarity
             FROM qa_pairs v
             JOIN qa_text t ON v.rowid = t.id
             WHERE v.prompt_embedding MATCH ? AND k = ?
             ORDER BY weighted_similarity DESC
             """
-            
+
             cursor.execute(query, (query_embedding_json, top_k))
             results = cursor.fetchall()
-            
+
             return [
                 {
-                    "response_text": row[0],
-                    "original_prompt": row[1],
-                    "similarity_score": 1 - row[2],
-                    "weight": row[3],
-                    "weighted_similarity": row[4]
+                    "id": row[0],
+                    "response_text": row[1],
+                    "original_prompt": row[2],
+                    "similarity_score": 1 - row[3],
+                    "weight": row[4],
+                    "weighted_similarity": row[5],
                 }
                 for row in results
             ]
@@ -143,22 +145,29 @@ def find_similar_prompts(project_name: str, query_embedding: np.ndarray, top_k: 
             # Original query without weights when weights are disabled
             query = """
             SELECT
+                t.id,
                 t.response_text,
                 t.prompt_text,
-                v.distance
+                v.distance,
+                COALESCE(t.weight, 1.0) AS weight,
+                (1 - v.distance) * COALESCE(t.weight, 1.0) AS weighted_similarity
             FROM qa_pairs v
             JOIN qa_text t ON v.rowid = t.id
             WHERE v.prompt_embedding MATCH ? AND k = ?
+            ORDER BY v.distance ASC
             """
-            
+
             cursor.execute(query, (query_embedding_json, top_k))
             results = cursor.fetchall()
-            
+
             return [
                 {
-                    "response_text": row[0],
-                    "original_prompt": row[1],
-                    "similarity_score": 1 - row[2] # vec distance is L2, 1-dist is a simple similarity metric
+                    "id": row[0],
+                    "response_text": row[1],
+                    "original_prompt": row[2],
+                    "similarity_score": 1 - row[3],
+                    "weight": row[4],
+                    "weighted_similarity": row[5],
                 }
                 for row in results
             ]

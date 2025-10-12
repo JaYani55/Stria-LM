@@ -176,28 +176,204 @@ class WebScraper:
     def scrape_with_crawler(self, start_url: str, max_pages: int = 10) -> List[Dict]:
         """Use Scrapy crawler to scrape website"""
         def run_spider():
-            process = CrawlerProcess({
-                'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'ROBOTSTXT_OBEY': True,
-                'DOWNLOAD_DELAY': 1,
-                'RANDOMIZE_DOWNLOAD_DELAY': True,
-                'COOKIES_ENABLED': False,
-                'LOG_LEVEL': 'WARNING'
-            })
+            # This function will be run in a separate process
+            q = multiprocessing.Queue()
+
+            def spider_process(queue):
+                try:
+                    process = CrawlerProcess({
+                        'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'ROBOTSTXT_OBEY': True,
+                        'DOWNLOAD_DELAY': 1,
+                        'RANDOMIZE_DOWNLOAD_DELAY': True,
+                        'COOKIES_ENABLED': False,
+                        'LOG_LEVEL': 'WARNING'
+                    })
+                    # Pass the spider *class* and its arguments to the crawler
+                    process.crawl(UniversalSpider, start_url=start_url, max_pages=max_pages)
+                    process.start() # This is a blocking call
+                    # After the crawl is finished, we need to get the data.
+                    # This part is tricky because the spider instance is not directly accessible.
+                    # A common pattern is to use a custom pipeline to store data or use signals.
+                    # For simplicity here, we'll rely on a workaround if possible, or recommend a redesign.
+                    # Let's assume for now the spider is modified to output to a shared object.
+                    # A queue is a more robust way to handle this.
+                    # The spider would need to be modified to put its results in the queue.
+                    # Let's modify the spider to accept a queue.
+                    # This requires a change in UniversalSpider's __init__ and how it stores data.
+                    # However, a simpler fix for the original error is just to pass the class.
+                    # The data retrieval part is a separate problem.
+                    # Let's assume the spider is designed to be run this way and data is retrieved later.
+                    # The error is about passing an instance, not about data retrieval.
+                    # The provided code `process.crawl(spider)` where `spider` is an instance is the issue.
+                    # It should be `process.crawl(UniversalSpider, start_url=start_url, max_pages=max_pages)`
+                    # The original code tries to get data back via `spider.scraped_data`, which won't work across processes.
+                    # Let's fix the immediate error and address data passing.
+                    
+                    # The spider needs to be modified to handle this properly.
+                    # Let's assume we can't change the spider for now and fix the call.
+                    # The issue is that `process.start()` blocks and `spider.scraped_data` is in another process's memory.
+                    
+                    # A proper fix involves using a queue or another IPC mechanism.
+                    # Let's implement that.
+                    
+                    # The spider needs to be modified to accept a queue.
+                    # Let's make that change to UniversalSpider.
+                    
+                    # In UniversalSpider.__init__, add `self.queue = queue`
+                    # In UniversalSpider.parse_page, instead of `self.scraped_data.append`, use `self.queue.put(page_data)`
+                    
+                    # But let's first try to fix the immediate error without deep refactoring.
+                    # The error is `crawler_or_spidercls argument cannot be a spider object`.
+                    # The fix is to pass the class.
+                    
+                    # The original code is:
+                    # spider = UniversalSpider(start_url, max_pages)
+                    # process.crawl(spider)
+                    # process.start()
+                    # return spider.scraped_data
+                    
+                    # This is fundamentally flawed for multiprocessing.
+                    # Let's fix it the right way with a queue.
+                    
+                    # We will modify the spider to accept a queue.
+                    # And then collect results from the queue.
+                    
+                    # This requires changing UniversalSpider.
+                    # Let's do it.
+                    
+                    # The spider will be defined inside this function to make it self-contained.
+                    
+                    class SpiderWithQueue(UniversalSpider):
+                        def __init__(self, *args, **kwargs):
+                            self.queue = kwargs.pop('queue', None)
+                            super().__init__(*args, **kwargs)
+                            self.scraped_data = [] # Keep local copy for single-process case
+
+                        def parse_page(self, response):
+                            # This overrides the parent method
+                            if self.pages_scraped >= self.max_pages:
+                                return
+
+                            self.pages_scraped += 1
+                            
+                            soup = BeautifulSoup(response.text, 'lxml')
+                            for script in soup(["script", "style", "nav", "header", "footer"]):
+                                script.decompose()
+                            
+                            text_content = soup.get_text(separator=' ', strip=True)
+                            lines = (line.strip() for line in text_content.splitlines())
+                            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                            text_content = ' '.join(chunk for chunk in chunks if chunk)
+                            
+                            page_data = {
+                                'url': response.url,
+                                'title': soup.title.string if soup.title else '',
+                                'content': text_content,
+                                'domain': urlparse(response.url).netloc
+                            }
+                            
+                            if self.queue:
+                                self.queue.put(page_data)
+                            else:
+                                self.scraped_data.append(page_data)
+                            
+                            logger.info(f"Scraped page {self.pages_scraped}/{self.max_pages}: {response.url}")
+                            yield page_data
+
+                    process.crawl(SpiderWithQueue, queue=queue, start_url=start_url, max_pages=max_pages)
+                    process.start() # Blocking call
+                    
+                except Exception as e:
+                    logger.error(f"Error in spider process: {e}")
+                finally:
+                    queue.put(None) # Sentinel value to indicate completion
+
+            p = multiprocessing.Process(target=spider_process, args=(q,))
+            p.start()
             
-            spider = UniversalSpider(start_url, max_pages)
-            process.crawl(spider)
-            process.start()
-            return spider.scraped_data
-        
+            results = []
+            while True:
+                item = q.get()
+                if item is None:
+                    break
+                results.append(item)
+            
+            p.join()
+            return results
+
         # Run spider in a separate process to avoid reactor issues
-        if hasattr(asyncio, '_get_running_loop') and asyncio._get_running_loop():
-            # If we're in an async context, use ThreadPoolExecutor
-            with ThreadPoolExecutor() as executor:
-                future = executor.submit(run_spider)
-                return future.result()
-        else:
-            return run_spider()
+        # This is a more robust way to handle Scrapy in other applications
+        ctx = multiprocessing.get_context('spawn')
+        q = ctx.Queue()
+
+        def spider_process(queue, start_url, max_pages):
+            try:
+                process = CrawlerProcess({
+                    'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'ROBOTSTXT_OBEY': True,
+                    'DOWNLOAD_DELAY': 1,
+                    'RANDOMIZE_DOWNLOAD_DELAY': True,
+                    'COOKIES_ENABLED': False,
+                    'LOG_LEVEL': 'WARNING'
+                })
+                
+                # The spider needs to be aware of the queue.
+                # We'll pass it in the constructor.
+                class SpiderForProcess(UniversalSpider):
+                    def __init__(self, *args, **kwargs):
+                        self.queue = kwargs.pop('queue', None)
+                        super().__init__(*args, **kwargs)
+                    
+                    def parse_page(self, response):
+                        # We override parse_page to put items in the queue
+                        if self.pages_scraped >= self.max_pages:
+                            return
+                        
+                        self.pages_scraped += 1
+                        
+                        soup = BeautifulSoup(response.text, 'lxml')
+                        for script in soup(["script", "style", "nav", "header", "footer"]):
+                            script.decompose()
+                        
+                        text_content = soup.get_text(separator=' ', strip=True)
+                        lines = (line.strip() for line in text_content.splitlines())
+                        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                        text_content = ' '.join(chunk for chunk in chunks if chunk)
+                        
+                        page_data = {
+                            'url': response.url,
+                            'title': soup.title.string if soup.title else '',
+                            'content': text_content,
+                            'domain': urlparse(response.url).netloc
+                        }
+                        
+                        if self.queue:
+                            self.queue.put(page_data)
+                        
+                        logger.info(f"Scraped page {self.pages_scraped}/{self.max_pages}: {response.url}")
+                        # We don't need to yield here as we're using the queue
+                
+                process.crawl(SpiderForProcess, start_url=start_url, max_pages=max_pages, queue=q)
+                process.start()
+            except Exception as e:
+                logger.error(f"Spider process failed: {e}")
+            finally:
+                # Signal that the process is done
+                q.put(None)
+
+        p = ctx.Process(target=spider_process, args=(q, start_url, max_pages))
+        p.start()
+        
+        scraped_data = []
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            scraped_data.append(item)
+        
+        p.join()
+        return scraped_data
     
     def scrape_website(self, url: str, max_pages: int = 10) -> List[Dict]:
         """
