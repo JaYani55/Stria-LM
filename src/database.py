@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import sqlite_vec
 from .config import ENABLE_WEIGHTS
+from . import embedding
 
 def get_db_connection(db_path: Path) -> sqlite3.Connection:
     """Establishes a database connection and loads the vec extension."""
@@ -161,6 +162,49 @@ def find_similar_prompts(project_name: str, query_embedding: np.ndarray, top_k: 
                 }
                 for row in results
             ]
+
+def re_embed_prompts(project_name: str, projects_dir: Path, ids: str | list[int] = "all", progress_callback=None):
+    """
+    Re-generates embeddings for specified prompts in the qa_text table.
+    """
+    db_path = get_db_path(project_name, projects_dir)
+    metadata = get_project_metadata(project_name, projects_dir)
+    if not metadata:
+        raise ValueError(f"Project '{project_name}' not found.")
+
+    model_name = metadata.get("embedding_model")
+    if not model_name:
+        raise ValueError("Embedding model not found in project metadata.")
+
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+
+        if ids == "all":
+            cursor.execute("SELECT id, prompt_text FROM qa_text")
+        else:
+            placeholders = ','.join('?' for _ in ids)
+            cursor.execute(f"SELECT id, prompt_text FROM qa_text WHERE id IN ({placeholders})", ids)
+        
+        prompts_to_re_embed = cursor.fetchall()
+        total_prompts = len(prompts_to_re_embed)
+
+        if total_prompts == 0:
+            return 0
+
+        for i, (row_id, prompt_text) in enumerate(prompts_to_re_embed):
+            # First, delete the old embedding for this rowid
+            cursor.execute("DELETE FROM qa_pairs WHERE rowid = ?", (row_id,))
+
+            new_embedding = embedding.generate_embedding(prompt_text, model_name)
+            embedding_bytes = new_embedding.astype(np.float32).tobytes()
+            
+            cursor.execute("INSERT INTO qa_pairs (rowid, prompt_embedding) VALUES (?, ?)", (row_id, embedding_bytes))
+            
+            if progress_callback:
+                progress_callback(i + 1, total_prompts)
+
+        conn.commit()
+        return total_prompts
 
 def get_project_metadata(project_name: str, projects_dir: Path):
     db_path = get_db_path(project_name, projects_dir)
