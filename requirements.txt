@@ -1,6 +1,7 @@
 altair==6.0.0
 annotated-types==0.7.0
 anyio==4.10.0
+asyncpg==0.29.0
 attrs==25.3.0
 Automat==25.4.16
 beautifulsoup4==4.13.5
@@ -60,10 +61,12 @@ orjson==3.11.3
 packaging==25.0
 pandas==2.3.3
 parsel==1.10.0
+pgvector==0.2.4
 pillow==11.3.0
 pluggy==1.6.0
 Protego==0.5.0
 protobuf==6.33.2
+psycopg2==2.9.11
 pyarrow==22.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.2

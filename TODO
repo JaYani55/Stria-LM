@@ -1,18 +1,1 @@
-- Test prompting also over Console 
-- Query StriaLM data as MCP - Query for context retrieval for LLM applications
-- DB editing, prompting, testing via CLI Tools
-- Add multiple actors to a single DB Projectfile
-- Add function calling capability - execute script or API call on retrieval
-- Add markdown-ui elements to retrieval
-- Optional emotion marker to response for visual responses.
-- tkinter GUI to:
-    - Load and serve models
-    - configure query API
-    - Create Project
-    - Create promptfile agent
-    - Create Agent embeddings
-    - configure answers, manually add answers and questions
-    - export as dataset for fine-tuning
-    - adjust answer weights
-- import/export question/answer pair in bulk
-- train LoRA model
+- Migrate to postgresql

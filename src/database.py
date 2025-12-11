@@ -1,294 +1,216 @@
-import sqlite3
 import json
-from pathlib import Path
 import numpy as np
-import sqlite_vec
-from .config import ENABLE_WEIGHTS
+from typing import List, Optional, Dict, Any
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import select, delete, func, desc
+from sqlalchemy.orm import selectinload
+from .config import DATABASE_URL, ENABLE_WEIGHTS
+from .models_db import Base, Project, QAPair, ScrapedContent, PromptFile
 from . import embedding
 
-def get_db_connection(db_path: Path) -> sqlite3.Connection:
-    """Establishes a database connection and loads the vec extension."""
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
-    return conn
+# Validate Database URL for Async Engine
+if not DATABASE_URL.startswith("postgresql+asyncpg://"):
+    if DATABASE_URL.startswith("postgresql://"):
+        # Auto-correct common mistake
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+    else:
+        raise ValueError(
+            f"Invalid DATABASE_URL scheme: {DATABASE_URL}. "
+            "For async SQLAlchemy, the URL must start with 'postgresql+asyncpg://'."
+        )
 
-def get_db_path(project_name: str, projects_dir: Path) -> Path:
-    return projects_dir / project_name / f"{project_name}.db"
+# Create Async Engine
+engine = create_async_engine(DATABASE_URL, echo=False)
 
-def init_db(project_name: str, embedding_model: str, vector_dim: int, projects_dir: Path):
+# Create Async Session Factory
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+async def init_db():
     """
-    Initializes a new SQLite database for a project.
+    Initializes the database tables.
     """
-    project_dir = projects_dir / project_name
-    project_dir.mkdir(exist_ok=True)
-    db_path = get_db_path(project_name, projects_dir)
+    async with engine.begin() as conn:
+        # Create tables
+        # Note: pgvector extension must be installed in the database manually or via migration
+        # CREATE EXTENSION IF NOT EXISTS vector;
+        await conn.run_sync(Base.metadata.create_all)
 
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
-
-        # Create metadata table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-        """)
-        
-        metadata = {
-            "embedding_model": embedding_model,
-            "vector_dimension": vector_dim
-        }
-        for key, value in metadata.items():
-            cursor.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (key, str(value)))
-
-        # Create virtual table for vector search using vec0
-        cursor.execute(f"""
-        CREATE VIRTUAL TABLE IF NOT EXISTS qa_pairs USING vec0(
-            prompt_embedding float[{vector_dim}]
-        )
-        """)
-
-        # Create a regular table to store the text data
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS qa_text (
-            id INTEGER PRIMARY KEY,
-            prompt_text TEXT NOT NULL,
-            response_text TEXT NOT NULL,
-            weight REAL DEFAULT 1.0
-        )
-        """)
-        
-        # Create table for scraped website content
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS scraped_content (
-            id INTEGER PRIMARY KEY,
-            url TEXT NOT NULL,
-            title TEXT,
-            content TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        
-        # Create table for generated prompt files
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS prompt_files (
-            id INTEGER PRIMARY KEY,
-            prompt_data TEXT NOT NULL,  -- JSON string of prompts
-            business_context TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        
-        conn.commit()
-
-def add_qa_pair(project_name: str, prompt: str, response: str, embedding: np.ndarray, projects_dir: Path, weight: float = 1.0):
-    db_path = get_db_path(project_name, projects_dir)
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
-        
-        # Insert text data with weight if enabled, otherwise use default
-        if ENABLE_WEIGHTS:
-            cursor.execute("INSERT INTO qa_text (prompt_text, response_text, weight) VALUES (?, ?, ?)", (prompt, response, weight))
-        else:
-            cursor.execute("INSERT INTO qa_text (prompt_text, response_text) VALUES (?, ?)", (prompt, response))
-        rowid = cursor.lastrowid
-
-        # Insert the embedding into the vec table with the same rowid
-        # Using the compact binary format for storage
-        embedding_bytes = embedding.astype(np.float32).tobytes()
-        cursor.execute("INSERT INTO qa_pairs (rowid, prompt_embedding) VALUES (?, ?)", (rowid, embedding_bytes))
-        
-        conn.commit()
-
-def find_similar_prompts(project_name: str, query_embedding: np.ndarray, top_k: int, projects_dir: Path):
-    db_path = get_db_path(project_name, projects_dir)
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
-        
-        # For querying with MATCH, the vector needs to be a JSON string
-        query_embedding_json = json.dumps(query_embedding.tolist())
-
-        if ENABLE_WEIGHTS:
-            # Query with weight-based ranking when weights are enabled
-            query = """
-            SELECT
-                t.id,
-                t.response_text,
-                t.prompt_text,
-                v.distance,
-                COALESCE(t.weight, 1.0) AS weight,
-                (1 - v.distance) * COALESCE(t.weight, 1.0) AS weighted_similarity
-            FROM qa_pairs v
-            JOIN qa_text t ON v.rowid = t.id
-            WHERE v.prompt_embedding MATCH ? AND k = ?
-            ORDER BY weighted_similarity DESC
-            """
-
-            cursor.execute(query, (query_embedding_json, top_k))
-            results = cursor.fetchall()
-
-            return [
-                {
-                    "id": row[0],
-                    "response_text": row[1],
-                    "original_prompt": row[2],
-                    "similarity_score": 1 - row[3],
-                    "weight": row[4],
-                    "weighted_similarity": row[5],
-                }
-                for row in results
-            ]
-        else:
-            # Original query without weights when weights are disabled
-            query = """
-            SELECT
-                t.id,
-                t.response_text,
-                t.prompt_text,
-                v.distance,
-                COALESCE(t.weight, 1.0) AS weight,
-                (1 - v.distance) * COALESCE(t.weight, 1.0) AS weighted_similarity
-            FROM qa_pairs v
-            JOIN qa_text t ON v.rowid = t.id
-            WHERE v.prompt_embedding MATCH ? AND k = ?
-            ORDER BY v.distance ASC
-            """
-
-            cursor.execute(query, (query_embedding_json, top_k))
-            results = cursor.fetchall()
-
-            return [
-                {
-                    "id": row[0],
-                    "response_text": row[1],
-                    "original_prompt": row[2],
-                    "similarity_score": 1 - row[3],
-                    "weight": row[4],
-                    "weighted_similarity": row[5],
-                }
-                for row in results
-            ]
-
-def re_embed_prompts(project_name: str, projects_dir: Path, ids: str | list[int] = "all", progress_callback=None):
+async def get_db():
     """
-    Re-generates embeddings for specified prompts in the qa_text table.
+    Dependency generator for FastAPI.
     """
-    db_path = get_db_path(project_name, projects_dir)
-    metadata = get_project_metadata(project_name, projects_dir)
-    if not metadata:
+    async with AsyncSessionLocal() as session:
+        yield session
+
+async def create_project(session: AsyncSession, project_name: str, embedding_model: str, vector_dim: int):
+    """
+    Creates a new project in the database.
+    """
+    project = Project(name=project_name, embedding_model=embedding_model, vector_dimension=vector_dim)
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+    return project
+
+async def get_project_by_name(session: AsyncSession, project_name: str) -> Optional[Project]:
+    result = await session.execute(select(Project).where(Project.name == project_name))
+    return result.scalar_one_or_none()
+
+async def list_projects(session: AsyncSession) -> List[str]:
+    result = await session.execute(select(Project.name))
+    return list(result.scalars().all())
+
+async def add_qa_pair(session: AsyncSession, project_name: str, prompt: str, response: str, embedding_vector: np.ndarray, weight: float = 1.0):
+    project = await get_project_by_name(session, project_name)
+    if not project:
         raise ValueError(f"Project '{project_name}' not found.")
 
-    model_name = metadata.get("embedding_model")
-    if not model_name:
-        raise ValueError("Embedding model not found in project metadata.")
+    qa_pair = QAPair(
+        project_id=project.id,
+        prompt_text=prompt,
+        response_text=response,
+        weight=weight,
+        embedding=embedding_vector
+    )
+    session.add(qa_pair)
+    await session.commit()
 
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
+async def find_similar_prompts(session: AsyncSession, project_name: str, query_embedding: np.ndarray, top_k: int) -> List[Dict[str, Any]]:
+    project = await get_project_by_name(session, project_name)
+    if not project:
+        raise ValueError(f"Project '{project_name}' not found.")
 
-        if ids == "all":
-            cursor.execute("SELECT id, prompt_text FROM qa_text")
-        else:
-            placeholders = ','.join('?' for _ in ids)
-            cursor.execute(f"SELECT id, prompt_text FROM qa_text WHERE id IN ({placeholders})", ids)
-        
-        prompts_to_re_embed = cursor.fetchall()
-        total_prompts = len(prompts_to_re_embed)
+    # Calculate cosine distance
+    # Note: pgvector's cosine_distance operator is <=>
+    distance_col = QAPair.embedding.cosine_distance(query_embedding).label("distance")
+    
+    stmt = select(QAPair, distance_col).where(QAPair.project_id == project.id)
 
-        if total_prompts == 0:
-            return 0
+    if ENABLE_WEIGHTS:
+        # weighted_similarity = (1 - distance) * weight
+        # We order by this descending
+        weighted_sim = (1 - distance_col) * QAPair.weight
+        stmt = stmt.order_by(weighted_sim.desc())
+    else:
+        # Order by distance ascending (closest first)
+        stmt = stmt.order_by(distance_col.asc())
 
-        for i, (row_id, prompt_text) in enumerate(prompts_to_re_embed):
-            # First, delete the old embedding for this rowid
-            cursor.execute("DELETE FROM qa_pairs WHERE rowid = ?", (row_id,))
+    stmt = stmt.limit(top_k)
+    
+    result = await session.execute(stmt)
+    rows = result.all()
 
-            new_embedding = embedding.generate_embedding(prompt_text, model_name)
-            embedding_bytes = new_embedding.astype(np.float32).tobytes()
-            
-            cursor.execute("INSERT INTO qa_pairs (rowid, prompt_embedding) VALUES (?, ?)", (row_id, embedding_bytes))
-            
-            if progress_callback:
-                progress_callback(i + 1, total_prompts)
+    return [
+        {
+            "id": row[0].id,
+            "response_text": row[0].response_text,
+            "original_prompt": row[0].prompt_text,
+            "similarity_score": 1 - row[1], # Convert distance back to similarity
+            "weight": row[0].weight,
+            "weighted_similarity": (1 - row[1]) * row[0].weight if ENABLE_WEIGHTS else None,
+        }
+        for row in rows
+    ]
 
-        conn.commit()
-        return total_prompts
+async def add_scraped_content(session: AsyncSession, project_name: str, scraped_data: list):
+    project = await get_project_by_name(session, project_name)
+    if not project:
+        raise ValueError(f"Project '{project_name}' not found.")
 
-def get_project_metadata(project_name: str, projects_dir: Path):
-    db_path = get_db_path(project_name, projects_dir)
-    if not db_path.exists():
+    for page_data in scraped_data:
+        content = ScrapedContent(
+            project_id=project.id,
+            url=page_data.get('url', ''),
+            title=page_data.get('title', ''),
+            content=page_data.get('content', ''),
+            domain=page_data.get('domain', '')
+        )
+        session.add(content)
+    
+    await session.commit()
+
+async def get_scraped_content(session: AsyncSession, project_name: str) -> List[Dict[str, Any]]:
+    project = await get_project_by_name(session, project_name)
+    if not project:
+        raise ValueError(f"Project '{project_name}' not found.")
+
+    result = await session.execute(select(ScrapedContent).where(ScrapedContent.project_id == project.id))
+    rows = result.scalars().all()
+
+    return [
+        {
+            "url": row.url,
+            "title": row.title,
+            "content": row.content,
+            "domain": row.domain
+        }
+        for row in rows
+    ]
+
+async def add_prompt_file(session: AsyncSession, project_name: str, prompt_data: str, business_context: str):
+    project = await get_project_by_name(session, project_name)
+    if not project:
+        raise ValueError(f"Project '{project_name}' not found.")
+
+    prompt_file = PromptFile(
+        project_id=project.id,
+        prompt_data=prompt_data,
+        business_context=business_context
+    )
+    session.add(prompt_file)
+    await session.commit()
+    return prompt_file.id
+
+async def get_latest_prompt_file(session: AsyncSession, project_name: str) -> Optional[Dict[str, Any]]:
+    project = await get_project_by_name(session, project_name)
+    if not project:
+        raise ValueError(f"Project '{project_name}' not found.")
+
+    stmt = select(PromptFile).where(PromptFile.project_id == project.id).order_by(PromptFile.created_at.desc()).limit(1)
+    result = await session.execute(stmt)
+    prompt_file = result.scalar_one_or_none()
+
+    if prompt_file:
+        return {
+            "prompt_data": prompt_file.prompt_data,
+            "business_context": prompt_file.business_context
+        }
+    return None
+
+async def get_project_metadata(session: AsyncSession, project_name: str) -> Optional[Dict[str, Any]]:
+    project = await get_project_by_name(session, project_name)
+    if not project:
         return None
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT key, value FROM metadata")
-        return dict(cursor.fetchall())
+    
+    return {
+        "embedding_model": project.embedding_model,
+        "vector_dimension": project.vector_dimension
+    }
 
-def add_scraped_content(project_name: str, scraped_data: list, projects_dir: Path):
-    """Add scraped website content to the database"""
-    db_path = get_db_path(project_name, projects_dir)
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
-        
-        for page_data in scraped_data:
-            cursor.execute("""
-                INSERT INTO scraped_content (url, title, content, domain)
-                VALUES (?, ?, ?, ?)
-            """, (
-                page_data.get('url', ''),
-                page_data.get('title', ''),
-                page_data.get('content', ''),
-                page_data.get('domain', '')
-            ))
-        
-        conn.commit()
+async def re_embed_prompts(session: AsyncSession, project_name: str, ids: str | list[int] = "all", progress_callback=None):
+    project = await get_project_by_name(session, project_name)
+    if not project:
+        raise ValueError(f"Project '{project_name}' not found.")
+    
+    model_name = project.embedding_model
 
-def get_scraped_content(project_name: str, projects_dir: Path):
-    """Retrieve all scraped content for a project"""
-    db_path = get_db_path(project_name, projects_dir)
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT url, title, content, domain FROM scraped_content")
-        results = cursor.fetchall()
-        
-        return [
-            {
-                "url": row[0],
-                "title": row[1],
-                "content": row[2],
-                "domain": row[3]
-            }
-            for row in results
-        ]
+    stmt = select(QAPair).where(QAPair.project_id == project.id)
+    if ids != "all":
+        stmt = stmt.where(QAPair.id.in_(ids))
+    
+    result = await session.execute(stmt)
+    qa_pairs = result.scalars().all()
+    total_prompts = len(qa_pairs)
 
-def add_prompt_file(project_name: str, prompt_data: str, business_context: str, projects_dir: Path):
-    """Add generated prompt file to the database"""
-    db_path = get_db_path(project_name, projects_dir)
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO prompt_files (prompt_data, business_context)
-            VALUES (?, ?)
-        """, (prompt_data, business_context))
-        conn.commit()
-        return cursor.lastrowid
+    if total_prompts == 0:
+        return 0
 
-def get_latest_prompt_file(project_name: str, projects_dir: Path):
-    """Get the latest generated prompt file for a project"""
-    db_path = get_db_path(project_name, projects_dir)
-    with get_db_connection(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT prompt_data, business_context 
-            FROM prompt_files 
-            ORDER BY created_at DESC 
-            LIMIT 1
-        """)
-        result = cursor.fetchone()
+    for i, qa_pair in enumerate(qa_pairs):
+        new_embedding = embedding.generate_embedding(qa_pair.prompt_text, model_name)
+        qa_pair.embedding = new_embedding
         
-        if result:
-            return {
-                "prompt_data": result[0],
-                "business_context": result[1]
-            }
-        return None
+        if progress_callback:
+            progress_callback(i + 1, total_prompts)
+    
+    await session.commit()
+    return total_prompts

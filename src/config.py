@@ -15,6 +15,10 @@ def load_config():
 
 config = load_config()
 
+# --- Database Configuration ---
+database_config = config.get("database", {})
+DATABASE_URL = database_config.get("url", "postgresql+asyncpg://postgres:password@localhost/strialm")
+
 # --- Embedding Configuration ---
 embedding_config = config.get("embedding", {})
 EMBEDDING_MODELS = embedding_config.get("models", {})

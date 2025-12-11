@@ -1,3 +1,5 @@
+Vision: An extensible vector database framework to store actor data for LLMs, QA pairs for fine-tuning or scrape, transform and store context data for RAG.
+
 # Stria-LM: Portable, File-Based Retrieval Models
 
 Stria-LM is a lightweight framework for building, managing, and querying retrieval-based chatbot models. The core philosophy is **simplicity and portability**. Each "trained" model is a self-contained SQLite database file that can be easily copied, shared, and deployed.
