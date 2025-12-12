@@ -1,217 +1,435 @@
+#!/usr/bin/env python3
+"""
+Stria-LM Data Manager - Streamlit GUI
+Interactive data browsing, editing, and management for Stria-LM projects.
+"""
 import streamlit as st
 import pandas as pd
-import sqlite3
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import sys
 import os
+import json
 
 # Ensure src module can be imported
 sys.path.append(os.getcwd())
 
-from src.config import PROJECTS_DIR
-from src.database import get_db_connection, get_db_path, re_embed_prompts
+from src.config import PROJECTS_DIR, DATABASE_TYPE, EMBEDDING_MODELS
+from src.database import get_database
 
 ROW_LIMIT = 200
 
-def discover_projects(projects_dir: Path) -> List[str]:
-    """Return the list of project names that have an associated SQLite database."""
-    project_names: List[str] = []
-    if not projects_dir.exists():
-        return []
-        
-    for entry in projects_dir.iterdir():
-        if not entry.is_dir():
-            continue
-        db_path = get_db_path(entry.name, projects_dir)
-        if db_path.exists():
-            project_names.append(entry.name)
-    return sorted(project_names)
-
-def get_tables(conn: sqlite3.Connection) -> List[str]:
-    """Get a list of tables in the database."""
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name")
-    return [row[0] for row in cursor.fetchall()]
-
-def get_table_primary_key(conn: sqlite3.Connection, table_name: str) -> Optional[str]:
-    """Get the primary key column name for a table."""
-    cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info({table_name})")
-    columns = cursor.fetchall()
-    # columns is a list of tuples/rows. 
-    # structure: (cid, name, type, notnull, dflt_value, pk)
-    # pk is the 6th element (index 5).
-    for col in columns:
-        # sqlite3.Row access by name if row_factory is set, but here we might get tuples if not set.
-        # The original code sets row_factory = sqlite3.Row.
-        # Let's assume we can access by index or name if we set it.
-        if isinstance(col, sqlite3.Row):
-            if col['pk']:
-                return col['name']
-        else:
-            if col[5]: # pk flag
-                return col[1] # name
-    return None
-
-def load_table_data(conn: sqlite3.Connection, table_name: str, limit: int = ROW_LIMIT) -> pd.DataFrame:
-    """Load data from a table into a pandas DataFrame."""
-    query = f"SELECT * FROM {table_name} LIMIT {limit}"
-    return pd.read_sql_query(query, conn)
-
-def update_database(conn: sqlite3.Connection, table_name: str, pk_name: str, original_df: pd.DataFrame, edited_df: pd.DataFrame):
-    """Compare original and edited DataFrames and update the database."""
-    changes_count = 0
-    cursor = conn.cursor()
-    
-    # Iterate over indices to find changes
-    # We assume the index hasn't changed and corresponds to the same rows because we are editing in place.
-    # However, st.data_editor might reorder if sorting is enabled?
-    # If the user sorts in the UI, the index in edited_df might be different?
-    # st.data_editor returns a dataframe with the same index as input usually.
-    
-    # To be safe, we should align by index if possible, or just iterate if we trust the order.
-    # Let's iterate by the DataFrame index.
-    
-    for i in original_df.index:
-        if i not in edited_df.index:
-            continue # Row deleted? (st.data_editor supports deletion if configured, but we assume fixed rows for now)
-            
-        row_old = original_df.loc[i]
-        row_new = edited_df.loc[i]
-        
-        if not row_old.equals(row_new):
-            # Something changed in this row
-            pk_value = row_old[pk_name]
-            
-            for col in original_df.columns:
-                if row_old[col] != row_new[col]:
-                    new_value = row_new[col]
-                    # Update this cell
-                    try:
-                        query = f'UPDATE "{table_name}" SET "{col}" = ? WHERE "{pk_name}" = ?'
-                        cursor.execute(query, (new_value, pk_value))
-                        changes_count += 1
-                    except Exception as e:
-                        st.error(f"Error updating {col} for ID {pk_value}: {e}")
-    
-    if changes_count > 0:
-        conn.commit()
-        st.success(f"Successfully updated {changes_count} cell(s).")
-    else:
-        st.info("No changes detected.")
 
 def main():
-    st.set_page_config(page_title="Stria-LM Project Manager", layout="wide")
+    st.set_page_config(
+        page_title="Stria-LM Data Manager", 
+        page_icon="📊",
+        layout="wide"
+    )
     
-    st.title("Stria-LM Project Manager")
+    st.title("📊 Stria-LM Data Manager")
+    st.caption(f"Database: {DATABASE_TYPE.upper()}")
 
-    # Sidebar
+    # Initialize database connection
+    try:
+        db = get_database()
+    except Exception as e:
+        st.error(f"Failed to connect to database: {e}")
+        st.info("Please check your database configuration in the Project Manager.")
+        return
+
+    # Sidebar - Project Selection
     st.sidebar.header("Project Selection")
-    projects = discover_projects(PROJECTS_DIR)
+    
+    try:
+        projects = db.list_projects()
+    except Exception as e:
+        st.sidebar.error(f"Error loading projects: {e}")
+        return
     
     if not projects:
-        st.sidebar.warning(f"No projects found in {PROJECTS_DIR}")
+        st.sidebar.warning("No projects found.")
+        st.info("Create a project using the Project Manager (Tkinter GUI) first.")
         return
 
     selected_project = st.sidebar.selectbox("Select Project", projects)
+    
+    if not selected_project:
+        return
 
-    if selected_project:
-        db_path = get_db_path(selected_project, PROJECTS_DIR)
+    # Display project info in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Project Info")
+    
+    try:
+        metadata = db.get_project_metadata(selected_project)
+        if metadata:
+            st.sidebar.write(f"**Model:** {metadata.get('embedding_model', 'N/A')}")
+            st.sidebar.write(f"**Dimension:** {metadata.get('vector_dim', 'N/A')}")
+            st.sidebar.write(f"**Created:** {metadata.get('created_at', 'N/A')}")
+    except Exception as e:
+        st.sidebar.warning(f"Could not load metadata: {e}")
+
+    # Main content tabs
+    tab_qa, tab_search, tab_ops, tab_add = st.tabs([
+        "📝 Q&A Pairs", 
+        "🔍 Semantic Search", 
+        "⚙️ Operations",
+        "➕ Add Data"
+    ])
+
+    # ==========================================================================
+    # Q&A PAIRS TAB
+    # ==========================================================================
+    with tab_qa:
+        st.subheader("Q&A Pairs Browser")
         
-        if not db_path.exists():
-            st.error(f"Database not found at {db_path}")
-            return
-
-        # Connect to database
-        # We use a context manager or just open/close. 
-        # Since Streamlit reruns, we open a new connection each time.
         try:
-            conn = get_db_connection(db_path)
-            # Set row factory to Row for easier access if needed, though pandas handles reading well.
-            conn.row_factory = sqlite3.Row
-        except Exception as e:
-            st.error(f"Failed to connect to database: {e}")
-            return
-
-        # Tabs for different functionalities
-        tab_browser, tab_ops = st.tabs(["Data Browser", "Database Operations"])
-
-        with tab_browser:
-            st.subheader("Data Browser")
-            tables = get_tables(conn)
+            qa_pairs = db.get_qa_pairs(selected_project, limit=ROW_LIMIT)
             
-            if not tables:
-                st.warning("No tables found in the database.")
+            if not qa_pairs:
+                st.info("No Q&A pairs found in this project.")
             else:
-                selected_table = st.selectbox("Select Table", tables)
+                # Convert to DataFrame for display
+                df = pd.DataFrame(qa_pairs)
                 
-                if selected_table:
-                    pk_name = get_table_primary_key(conn, selected_table)
+                # Display count
+                st.info(f"Showing {len(qa_pairs)} Q&A pairs (limit: {ROW_LIMIT})")
+                
+                # Column selector
+                all_columns = list(df.columns)
+                display_columns = st.multiselect(
+                    "Columns to display",
+                    all_columns,
+                    default=[c for c in ['id', 'prompt', 'response', 'weight'] if c in all_columns]
+                )
+                
+                if display_columns:
+                    # Display as interactive table
+                    edited_df = st.data_editor(
+                        df[display_columns],
+                        key=f"qa_editor_{selected_project}",
+                        num_rows="fixed",
+                        use_container_width=True
+                    )
                     
-                    if not pk_name:
-                        st.warning(f"Table '{selected_table}' has no primary key. Editing is disabled.")
-                        df = load_table_data(conn, selected_table)
-                        st.dataframe(df)
-                    else:
-                        # Load data
-                        df = load_table_data(conn, selected_table)
+                    # Save changes button
+                    if st.button("💾 Save Changes", key="save_qa"):
+                        changes_made = 0
+                        for idx in df.index:
+                            if idx < len(edited_df):
+                                for col in display_columns:
+                                    if col in df.columns and df.loc[idx, col] != edited_df.loc[idx, col]:
+                                        # Update this value
+                                        qa_id = df.loc[idx, 'id'] if 'id' in df.columns else idx
+                                        try:
+                                            db.update_qa_pair(
+                                                selected_project, 
+                                                qa_id, 
+                                                {col: edited_df.loc[idx, col]}
+                                            )
+                                            changes_made += 1
+                                        except Exception as e:
+                                            st.error(f"Error updating row {qa_id}: {e}")
                         
-                        st.info(f"Showing first {ROW_LIMIT} rows. Primary Key: {pk_name}")
-                        
-                        # Data Editor
-                        edited_df = st.data_editor(df, key=f"editor_{selected_project}_{selected_table}", num_rows="fixed")
-                        
-                        if st.button("Save Changes"):
-                            update_database(conn, selected_table, pk_name, df, edited_df)
+                        if changes_made > 0:
+                            st.success(f"Updated {changes_made} values.")
                             st.rerun()
+                        else:
+                            st.info("No changes detected.")
+                else:
+                    st.warning("Select at least one column to display.")
+                    
+        except Exception as e:
+            st.error(f"Error loading Q&A pairs: {e}")
 
-        with tab_ops:
-            st.subheader("Database Operations")
-            
-            st.markdown("### Re-embed Prompts")
-            st.write("Regenerate embeddings for prompts in the database.")
-            
-            re_embed_mode = st.radio("Mode", ["All Prompts", "Specific IDs"])
-            
-            ids_input = ""
-            if re_embed_mode == "Specific IDs":
-                ids_input = st.text_input("Enter Prompt IDs (comma-separated)", placeholder="1, 2, 3")
-            
-            if st.button("Start Re-embedding"):
-                ids_to_process = "all"
-                if re_embed_mode == "Specific IDs":
+    # ==========================================================================
+    # SEMANTIC SEARCH TAB
+    # ==========================================================================
+    with tab_search:
+        st.subheader("Semantic Search")
+        st.write("Search for similar prompts using vector embeddings.")
+        
+        query = st.text_area("Enter your query:", height=100, placeholder="Type a question or phrase...")
+        
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            top_k = st.number_input("Number of results", min_value=1, max_value=50, value=5)
+        
+        if st.button("🔍 Search", type="primary"):
+            if not query.strip():
+                st.warning("Please enter a query.")
+            else:
+                with st.spinner("Searching..."):
                     try:
-                        ids_to_process = [int(x.strip()) for x in ids_input.split(",") if x.strip()]
-                        if not ids_to_process:
-                            st.error("Please enter at least one valid ID.")
-                            ids_to_process = None
-                    except ValueError:
-                        st.error("Invalid input. Please enter numbers separated by commas.")
-                        ids_to_process = None
-                
-                if ids_to_process:
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    def progress_callback(current, total):
-                        progress = min(current / total, 1.0)
-                        progress_bar.progress(progress)
-                        status_text.text(f"Processing {current} of {total}...")
-                    
-                    try:
-                        with st.spinner("Re-embedding..."):
-                            count = re_embed_prompts(
-                                selected_project, 
-                                PROJECTS_DIR, 
-                                ids_to_process, 
-                                progress_callback=progress_callback
-                            )
-                        st.success(f"Successfully re-embedded {count} prompt(s).")
+                        from src import embedding as emb_module
+                        
+                        # Get embedding model for this project
+                        metadata = db.get_project_metadata(selected_project)
+                        model_name = metadata.get('embedding_model', 'sentence-transformers/all-MiniLM-L6-v2')
+                        
+                        # Generate query embedding
+                        query_embedding = emb_module.generate_embedding(query, model_name)
+                        
+                        # Search
+                        results = db.find_similar_prompts(selected_project, query_embedding, top_k)
+                        
+                        if not results:
+                            st.info("No matching results found.")
+                        else:
+                            st.success(f"Found {len(results)} results:")
+                            
+                            for i, result in enumerate(results, 1):
+                                with st.expander(f"Result {i} (Score: {result.get('score', 'N/A'):.4f})" if 'score' in result else f"Result {i}"):
+                                    st.markdown(f"**Prompt:** {result.get('prompt', 'N/A')}")
+                                    st.markdown(f"**Response:** {result.get('response', 'N/A')}")
+                                    if 'weight' in result:
+                                        st.caption(f"Weight: {result['weight']}")
+                                        
                     except Exception as e:
-                        st.error(f"Error during re-embedding: {e}")
+                        st.error(f"Search failed: {e}")
 
-        conn.close()
+    # ==========================================================================
+    # OPERATIONS TAB
+    # ==========================================================================
+    with tab_ops:
+        st.subheader("Database Operations")
+        
+        # Re-embedding section
+        st.markdown("### 🔄 Re-embed Prompts")
+        st.write("Regenerate vector embeddings for prompts in the database.")
+        
+        re_embed_mode = st.radio(
+            "Mode", 
+            ["All Prompts", "Specific IDs"],
+            horizontal=True
+        )
+        
+        ids_input = ""
+        if re_embed_mode == "Specific IDs":
+            ids_input = st.text_input(
+                "Enter Prompt IDs (comma-separated)", 
+                placeholder="1, 2, 3"
+            )
+        
+        if st.button("🔄 Start Re-embedding"):
+            ids_to_process = "all"
+            if re_embed_mode == "Specific IDs":
+                try:
+                    ids_to_process = [int(x.strip()) for x in ids_input.split(",") if x.strip()]
+                    if not ids_to_process:
+                        st.error("Please enter at least one valid ID.")
+                        ids_to_process = None
+                except ValueError:
+                    st.error("Invalid input. Please enter numbers separated by commas.")
+                    ids_to_process = None
+            
+            if ids_to_process:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                def progress_callback(current, total):
+                    progress = min(current / total, 1.0) if total > 0 else 1.0
+                    progress_bar.progress(progress)
+                    status_text.text(f"Processing {current} of {total}...")
+                
+                try:
+                    with st.spinner("Re-embedding..."):
+                        count = db.re_embed_prompts(
+                            selected_project,
+                            ids_to_process,
+                            progress_callback=progress_callback
+                        )
+                    st.success(f"Successfully re-embedded {count} prompt(s).")
+                except Exception as e:
+                    st.error(f"Error during re-embedding: {e}")
+        
+        st.markdown("---")
+        
+        # Export section
+        st.markdown("### 📤 Export Project")
+        st.write("Export this project to a portable SQLite database file.")
+        
+        export_path = st.text_input(
+            "Export path", 
+            value=f"exports/{selected_project}/{selected_project}.db"
+        )
+        
+        if st.button("📤 Export"):
+            try:
+                # Create export directory if needed
+                export_dir = Path(export_path).parent
+                export_dir.mkdir(parents=True, exist_ok=True)
+                
+                with st.spinner("Exporting..."):
+                    db.export_to_sqlite(selected_project, export_path)
+                st.success(f"Project exported to {export_path}")
+            except NotImplementedError:
+                st.warning("Export is only available for PostgreSQL projects (already SQLite).")
+            except Exception as e:
+                st.error(f"Export failed: {e}")
+        
+        st.markdown("---")
+        
+        # Delete prompts section
+        st.markdown("### 🗑️ Delete Q&A Pairs")
+        st.write("Delete specific Q&A pairs by ID.")
+        
+        delete_ids = st.text_input(
+            "IDs to delete (comma-separated)",
+            placeholder="1, 2, 3",
+            key="delete_ids"
+        )
+        
+        if st.button("🗑️ Delete Selected", type="secondary"):
+            if not delete_ids.strip():
+                st.warning("Please enter at least one ID to delete.")
+            else:
+                try:
+                    ids = [int(x.strip()) for x in delete_ids.split(",") if x.strip()]
+                    
+                    if st.session_state.get('confirm_delete') != delete_ids:
+                        st.session_state['confirm_delete'] = delete_ids
+                        st.warning(f"Click again to confirm deletion of {len(ids)} Q&A pair(s).")
+                    else:
+                        deleted = 0
+                        for qa_id in ids:
+                            try:
+                                db.delete_qa_pair(selected_project, qa_id)
+                                deleted += 1
+                            except Exception as e:
+                                st.error(f"Error deleting ID {qa_id}: {e}")
+                        
+                        st.success(f"Deleted {deleted} Q&A pair(s).")
+                        st.session_state.pop('confirm_delete', None)
+                        st.rerun()
+                        
+                except ValueError:
+                    st.error("Invalid input. Please enter numbers separated by commas.")
+
+    # ==========================================================================
+    # ADD DATA TAB
+    # ==========================================================================
+    with tab_add:
+        st.subheader("Add New Q&A Pair")
+        
+        new_prompt = st.text_area(
+            "Prompt",
+            height=100,
+            placeholder="Enter the prompt/question..."
+        )
+        
+        new_response = st.text_area(
+            "Response",
+            height=200,
+            placeholder="Enter the response/answer..."
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            new_weight = st.number_input(
+                "Weight",
+                min_value=0.0,
+                max_value=10.0,
+                value=1.0,
+                step=0.1,
+                help="Higher weight = higher priority in search results"
+            )
+        
+        if st.button("➕ Add Q&A Pair", type="primary"):
+            if not new_prompt.strip():
+                st.warning("Please enter a prompt.")
+            elif not new_response.strip():
+                st.warning("Please enter a response.")
+            else:
+                try:
+                    from src import embedding as emb_module
+                    
+                    with st.spinner("Generating embedding..."):
+                        # Get embedding model for this project
+                        metadata = db.get_project_metadata(selected_project)
+                        model_name = metadata.get('embedding_model', 'sentence-transformers/all-MiniLM-L6-v2')
+                        
+                        # Generate embedding
+                        prompt_embedding = emb_module.generate_embedding(new_prompt, model_name)
+                        
+                        # Add to database
+                        qa_id = db.add_qa_pair(
+                            selected_project,
+                            new_prompt.strip(),
+                            new_response.strip(),
+                            prompt_embedding,
+                            new_weight
+                        )
+                    
+                    st.success(f"Added Q&A pair with ID: {qa_id}")
+                    st.balloons()
+                    
+                except Exception as e:
+                    st.error(f"Failed to add Q&A pair: {e}")
+        
+        st.markdown("---")
+        
+        # Bulk import section
+        st.markdown("### 📥 Bulk Import")
+        st.write("Import Q&A pairs from a JSON file.")
+        
+        uploaded_file = st.file_uploader(
+            "Upload JSON file",
+            type=['json'],
+            help="Expected format: [{\"prompt\": \"...\", \"response\": \"...\", \"weight\": 1.0}, ...]"
+        )
+        
+        if uploaded_file is not None:
+            try:
+                data = json.load(uploaded_file)
+                
+                if not isinstance(data, list):
+                    st.error("JSON must contain a list of Q&A pairs.")
+                else:
+                    st.info(f"Found {len(data)} Q&A pairs in file.")
+                    
+                    # Preview
+                    if data:
+                        st.write("Preview (first 3):")
+                        for item in data[:3]:
+                            st.json(item)
+                    
+                    if st.button("📥 Import All"):
+                        from src import embedding as emb_module
+                        
+                        metadata = db.get_project_metadata(selected_project)
+                        model_name = metadata.get('embedding_model', 'sentence-transformers/all-MiniLM-L6-v2')
+                        
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        added = 0
+                        errors = 0
+                        
+                        for i, item in enumerate(data):
+                            try:
+                                prompt = item.get('prompt', '')
+                                response = item.get('response', '')
+                                weight = item.get('weight', 1.0)
+                                
+                                if prompt and response:
+                                    embedding = emb_module.generate_embedding(prompt, model_name)
+                                    db.add_qa_pair(selected_project, prompt, response, embedding, weight)
+                                    added += 1
+                                    
+                            except Exception as e:
+                                errors += 1
+                            
+                            progress = (i + 1) / len(data)
+                            progress_bar.progress(progress)
+                            status_text.text(f"Processing {i + 1} of {len(data)}...")
+                        
+                        st.success(f"Imported {added} Q&A pairs. Errors: {errors}")
+                        
+            except json.JSONDecodeError:
+                st.error("Invalid JSON file.")
+
 
 if __name__ == "__main__":
     main()
