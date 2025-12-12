@@ -2,34 +2,72 @@ Vision: An extensible vector database framework to store actor data for LLMs, QA
 
 # Stria-LM: Portable, File-Based Retrieval Models
 
-Stria-LM is a lightweight framework for building, managing, and querying retrieval-based chatbot models. The core philosophy is **simplicity and portability**. Each "trained" model is a self-contained SQLite database file that can be easily copied, shared, and deployed.
+Stria-LM is a lightweight framework for building, managing, and querying retrieval-based chatbot models. The core philosophy is **simplicity and portability**. Each "trained" model can be a self-contained SQLite database file that can be easily copied, shared, and deployed—or stored in a centralized PostgreSQL server for team collaboration.
 
 Instead of traditional model training (i.e., adjusting weights), "training" in Stria-LM is the process of populating a knowledge base with prompt-response pairs. The system's intelligence comes from using sentence embeddings to find the most semantically similar prompt in its database to a user's query and returning the corresponding response.
 
 ## Core Concepts
 
-*   **The Model is the Database:** Each chatbot is a single `sqlite` file. This file contains all the data (prompt/response pairs) and the vector index needed for fast semantic search.
+*   **The Model is the Database:** Each chatbot project contains all the data (prompt/response pairs) and the vector index needed for fast semantic search.
+*   **Flexible Database Backends:** Choose between SQLite (local, portable files) or PostgreSQL (centralized, scalable server).
 *   **Intelligence via Embeddings:** User queries are converted into numerical vectors (embeddings). The system finds the closest matching vector in the database to retrieve the most relevant pre-generated response.
-*   **Portability:** Because a trained bot is just a single file, it can be moved, backed up, or deployed with minimal effort.
+*   **Portability:** Export any project to a portable SQLite file for backup, sharing, or offline deployment.
+
+## Database Options
+
+Stria-LM supports two database backends through a unified abstraction layer:
+
+### SQLite + sqlite-vec (Default)
+- **Best for:** Local development, offline use, portable deployments
+- **Storage:** Each project is a separate `.db` file in the `projects/` directory
+- **Vector search:** Uses [sqlite-vec](https://github.com/asg017/sqlite-vec) extension
+
+### PostgreSQL + pgvector
+- **Best for:** Team collaboration, cloud deployment, large-scale applications
+- **Storage:** All projects in a single centralized database
+- **Vector search:** Uses [pgvector](https://github.com/pgvector/pgvector) extension
+
+### Switching Databases
+
+Set the `DATABASE_TYPE` in your `.env` file:
+
+```bash
+# For local SQLite databases (default)
+DATABASE_TYPE=sqlite
+
+# For PostgreSQL server
+DATABASE_TYPE=postgresql
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/strialm
+```
 
 ## Project Structure
 
 ```
 stria-lm/
-├── projects/                # Each sub-directory holds a trained model
+├── projects/                # SQLite databases (one per project)
 │   └── my-new-bot/
 │       └── my-new-bot.db
+├── exports/                 # Exported portable databases
 ├── src/
 │   ├── main.py              # FastAPI application logic
-│   ├── database.py          # Functions for DB creation and queries
+│   ├── database/            # Database abstraction layer
+│   │   ├── base.py          # Abstract backend interface
+│   │   ├── sqlite.py        # SQLite + sqlite-vec implementation
+│   │   └── postgresql.py    # PostgreSQL + pgvector implementation
 │   ├── embedding.py         # Embedding model loader and functions
 │   ├── models.py            # Pydantic models for API request/response
+│   ├── models_db.py         # SQLAlchemy models for PostgreSQL
 │   └── config.py            # Application settings
 ├── scripts/
-│   └── bulk_importer.py     # Example script to populate a model from a CSV
+│   ├── bulk_importer.py     # Populate a model from CSV
+│   └── export_to_sqlite.py  # Export projects to portable SQLite files
+├── docs/
+│   └── data-structures.md   # Detailed data structure documentation
 ├── tests/
 │   └── test_api.py          # Tests for the API endpoints
-├── .env                     # Environment variables
+├── .env                     # Environment variables (secrets)
+├── .env.example             # Template for .env file
+├── config.toml              # Application configuration
 └── requirements.txt         # Python dependencies
 ```
 
@@ -159,9 +197,149 @@ pytest
 ```
 This will automatically discover and run the tests in the `tests/` directory.
 
-## GUI utilities
+## Import/Export Projects
 
-Two Tkinter-based desktop helpers are included for convenience:
+Stria-LM allows you to export projects to portable SQLite database files and import them into any backend. This enables:
 
-- `run_gui_inferenceServer.py` loads a local GGUF model and runs the FastAPI inference server with start/stop controls.
-- `run_gui_project_manager.py` lets you browse the SQLite-Vec project databases. When launched it lists the available projects in the `projects/` folder, opens the selected database, and shows the tables and their contents for quick inspection (first 200 rows per table).
+- **Backup:** Create portable backups of your projects
+- **Sharing:** Share projects as single `.db` files
+- **Migration:** Move projects between SQLite and PostgreSQL
+- **Offline Deployment:** Deploy exported databases to offline environments
+
+### Export via API
+
+```bash
+curl -X POST "http://127.0.0.1:8000/projects/my-faq-bot/export" \
+  -H "Content-Type: application/json" \
+  -d '{"output_path": "exports/my-faq-bot.db"}'
+```
+
+### Export via Command Line
+
+```bash
+# Export a single project
+python scripts/export_to_sqlite.py my-faq-bot
+
+# Export with custom path
+python scripts/export_to_sqlite.py my-faq-bot ~/backups/my-faq-bot.db
+
+# Export all projects
+python scripts/export_to_sqlite.py --all
+
+# List available projects
+python scripts/export_to_sqlite.py --list
+```
+
+### Import via API
+
+```bash
+curl -X POST "http://127.0.0.1:8000/projects/imported-bot/import" \
+  -H "Content-Type: application/json" \
+  -d '{"input_path": "exports/my-faq-bot.db"}'
+```
+
+## GUI Utilities
+
+### Project Manager (Tkinter)
+`run_gui_project_manager.py` - Setup and configuration interface
+
+- **Projects Tab:** Create, view, and delete projects
+- **Environment Variables Tab:** Edit API keys and database settings
+- **Database Tab:** Switch database types, import/export projects, PostgreSQL setup guide
+- **About Tab:** Application info and quick actions
+
+```bash
+python run_gui_project_manager.py
+```
+
+### Data Manager (Streamlit)
+`streamlit_project_manager.py` - Interactive data browsing and editing
+
+- **Q&A Pairs Tab:** Browse and edit prompt/response data
+- **Semantic Search Tab:** Test vector similarity search
+- **Operations Tab:** Re-embed prompts, export projects, delete data
+- **Add Data Tab:** Add individual Q&A pairs or bulk import from JSON
+
+```bash
+streamlit run streamlit_project_manager.py
+```
+
+### Inference Server (Tkinter)
+`run_gui_inferenceServer.py` - Local GGUF model inference server with start/stop controls
+
+## Configuration
+
+### Environment Variables (.env)
+
+Create a `.env` file from the template:
+
+```bash
+cp .env.example .env
+```
+
+Key variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATABASE_TYPE` | Database backend (`sqlite` or `postgresql`) | `sqlite` |
+| `DATABASE_URL` | PostgreSQL connection URL | - |
+| `OPENROUTER_API_KEY` | OpenRouter API key for LLM agents | - |
+| `OPENAI_API_KEY` | OpenAI API key for embeddings | - |
+| `ENABLE_WEIGHTS` | Enable weighted similarity scoring | `true` |
+
+### config.toml
+
+Non-sensitive configuration:
+
+```toml
+[database]
+type = "sqlite"
+sqlite_path = "projects"
+
+[embedding]
+default_model = "local_default"
+
+[embedding.models.local_default]
+category = "Local"
+model = "sentence-transformers/all-MiniLM-L6-v2"
+
+[experimental]
+enable_weights = true
+```
+
+## PostgreSQL Setup
+
+To use PostgreSQL instead of SQLite:
+
+1. **Install PostgreSQL** from https://www.postgresql.org/download/
+
+2. **Create database and enable pgvector:**
+   ```sql
+   CREATE DATABASE strialm;
+   \c strialm
+   CREATE EXTENSION vector;
+   ```
+
+3. **Configure connection in `.env`:**
+   ```bash
+   DATABASE_TYPE=postgresql
+   DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/strialm
+   ```
+
+4. **Restart the application**
+
+## Documentation
+
+- [Data Structures Reference](docs/data-structures.md) - Detailed schema and extension guide
+
+## License
+
+This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
+
+Copyright © 2025 Pluracon, Jay Rathjen
+
+---
+
+<p align="center">
+  Made with ❤️ by <strong>Pluracon, Jay Rathjen</strong>
+</p>
