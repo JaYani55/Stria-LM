@@ -123,9 +123,62 @@ def create_default_env():
             "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost/strialm",
             "OPENROUTER_API_KEY": "",
             "OPENAI_API_KEY": "",
+            "INFERENCE_BASE_URL": "http://localhost:8080/v1",
+            "INFERENCE_API_KEY": "",
             "ENABLE_WEIGHTS": "true"
         }
         save_env_variables(default_vars)
         return True
     return False
+
+
+def get_config_value(section: str, key: str, default=None):
+    """
+    Get a configuration value with environment variable override.
+    
+    Priority:
+    1. Environment variable (SECTION_KEY format, e.g., INFERENCE_BASE_URL)
+    2. Config file value (config[section][key]) - FRESHLY LOADED
+    3. Default value
+    
+    Args:
+        section: Config section (e.g., "inference", "database")
+        key: Config key within section (e.g., "base_url", "api_key")
+        default: Default value if not found
+        
+    Returns:
+        Configuration value
+    """
+    # Check environment variable first
+    env_key = f"{section.upper()}_{key.upper()}"
+    
+    # Reload env vars to get latest
+    load_dotenv(ENV_PATH, override=True)
+    env_value = os.getenv(env_key)
+    if env_value:
+        return env_value
+    
+    # Also check for OPENROUTER_API_KEY as fallback for inference api_key
+    if section == "inference" and key == "api_key":
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        if openrouter_key:
+            return openrouter_key
+        inference_key = os.getenv("INFERENCE_API_KEY")
+        if inference_key:
+            return inference_key
+    
+    # Reload config file to get latest values
+    fresh_config = load_config()
+    
+    # Check config file
+    section_config = fresh_config.get(section, {})
+    if key in section_config:
+        return section_config[key]
+    
+    return default
+
+
+# Initialize inference settings from config/env
+INFERENCE_BASE_URL = get_config_value("inference", "base_url", "http://localhost:8080/v1")
+INFERENCE_API_KEY = get_config_value("inference", "api_key", "")
 

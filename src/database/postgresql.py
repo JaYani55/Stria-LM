@@ -5,6 +5,7 @@ Uses async SQLAlchemy with asyncpg driver.
 
 import json
 import asyncio
+import uuid as uuid_module
 from typing import List, Dict, Any, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
@@ -14,7 +15,7 @@ from sqlalchemy import select, update, delete, func, text
 from sqlalchemy.exc import OperationalError
 
 from .base import DatabaseBackend
-from ..models_db import Base, Project, QAPair, ScrapedContent, PromptFile
+from ..models_db import Base, Project, QAPair, ScrapedContent, PromptFile, Actor, Persona, ChatSession, ChatMessage
 
 
 class PostgreSQLBackend(DatabaseBackend):
@@ -703,3 +704,612 @@ class PostgreSQLBackend(DatabaseBackend):
         conn.commit()
         conn.close()
         return True
+
+    # ==================== Actor Operations ====================
+    
+    def create_actor(
+        self, 
+        project_name: str,
+        actor_name: str,
+        description: str = "",
+        prompt_messages: Optional[List[Dict[str, str]]] = None,
+        model_name: str = "gpt-4",
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        top_p: float = 1.0,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
+        other_generation_parameters: Optional[Dict[str, Any]] = None
+    ) -> str:
+        async def _create():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    raise ValueError(f"Project '{project_name}' not found")
+                
+                actor = Actor(
+                    project_id=project.id,
+                    actor_name=actor_name,
+                    description=description,
+                    prompt_messages=prompt_messages or [],
+                    model_name=model_name,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    top_k=top_k,
+                    repetition_penalty=repetition_penalty,
+                    other_generation_parameters=other_generation_parameters
+                )
+                session.add(actor)
+                await session.commit()
+                await session.refresh(actor)
+                return str(actor.actor_id)
+        return self._run_async(_create())
+    
+    def get_actor(self, project_name: str, actor_id: str) -> Optional[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return None
+                
+                result = await session.execute(
+                    select(Actor).where(
+                        Actor.actor_id == int(actor_id),
+                        Actor.project_id == project.id
+                    )
+                )
+                actor = result.scalar_one_or_none()
+                
+                if actor:
+                    return {
+                        "actor_id": str(actor.actor_id),
+                        "actor_name": actor.actor_name,
+                        "description": actor.description,
+                        "prompt_messages": actor.prompt_messages,
+                        "model_name": actor.model_name,
+                        "temperature": actor.temperature,
+                        "max_tokens": actor.max_tokens,
+                        "top_p": actor.top_p,
+                        "top_k": actor.top_k,
+                        "repetition_penalty": actor.repetition_penalty,
+                        "other_generation_parameters": actor.other_generation_parameters,
+                        "created_at": actor.created_at.isoformat() if actor.created_at else None,
+                        "updated_at": actor.updated_at.isoformat() if actor.updated_at else None
+                    }
+                return None
+        return self._run_async(_get())
+    
+    def get_actor_by_name(self, project_name: str, actor_name: str) -> Optional[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return None
+                
+                result = await session.execute(
+                    select(Actor).where(
+                        Actor.actor_name == actor_name,
+                        Actor.project_id == project.id
+                    )
+                )
+                actor = result.scalar_one_or_none()
+                
+                if actor:
+                    return {
+                        "actor_id": str(actor.actor_id),
+                        "actor_name": actor.actor_name,
+                        "description": actor.description,
+                        "prompt_messages": actor.prompt_messages,
+                        "model_name": actor.model_name,
+                        "temperature": actor.temperature,
+                        "max_tokens": actor.max_tokens,
+                        "top_p": actor.top_p,
+                        "top_k": actor.top_k,
+                        "repetition_penalty": actor.repetition_penalty,
+                        "other_generation_parameters": actor.other_generation_parameters,
+                        "created_at": actor.created_at.isoformat() if actor.created_at else None,
+                        "updated_at": actor.updated_at.isoformat() if actor.updated_at else None
+                    }
+                return None
+        return self._run_async(_get())
+    
+    def list_actors(self, project_name: str) -> List[Dict[str, Any]]:
+        async def _list():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return []
+                
+                result = await session.execute(
+                    select(Actor).where(Actor.project_id == project.id)
+                )
+                actors = result.scalars().all()
+                
+                return [
+                    {
+                        "actor_id": str(a.actor_id),
+                        "actor_name": a.actor_name,
+                        "description": a.description,
+                        "model_name": a.model_name,
+                        "temperature": a.temperature,
+                        "max_tokens": a.max_tokens,
+                        "created_at": a.created_at.isoformat() if a.created_at else None
+                    }
+                    for a in actors
+                ]
+        return self._run_async(_list())
+    
+    def update_actor(self, project_name: str, actor_id: str, updates: Dict[str, Any]) -> bool:
+        async def _update():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return False
+                
+                # Filter valid columns
+                valid_columns = {
+                    'actor_name', 'description', 'prompt_messages', 'model_name',
+                    'temperature', 'max_tokens', 'top_p', 'top_k', 
+                    'repetition_penalty', 'other_generation_parameters'
+                }
+                filtered_updates = {k: v for k, v in updates.items() if k in valid_columns}
+                
+                if not filtered_updates:
+                    return False
+                
+                result = await session.execute(
+                    update(Actor)
+                    .where(Actor.actor_id == int(actor_id), Actor.project_id == project.id)
+                    .values(**filtered_updates)
+                )
+                await session.commit()
+                return result.rowcount > 0
+        return self._run_async(_update())
+    
+    def delete_actor(self, project_name: str, actor_id: str) -> bool:
+        async def _delete():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return False
+                
+                result = await session.execute(
+                    delete(Actor).where(
+                        Actor.actor_id == int(actor_id),
+                        Actor.project_id == project.id
+                    )
+                )
+                await session.commit()
+                return result.rowcount > 0
+        return self._run_async(_delete())
+    
+    # ==================== Persona Operations ====================
+    
+    def create_persona(
+        self, 
+        project_name: str,
+        persona_name: str,
+        display_name: str,
+        is_ai: bool = False,
+        fallback_actor_id: Optional[str] = None
+    ) -> str:
+        async def _create():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    raise ValueError(f"Project '{project_name}' not found")
+                
+                persona = Persona(
+                    persona_id=str(uuid_module.uuid4()),
+                    project_id=project.id,
+                    persona_name=persona_name,
+                    display_name=display_name,
+                    is_ai=is_ai,
+                    fallback_actor_id=int(fallback_actor_id) if fallback_actor_id else None
+                )
+                session.add(persona)
+                await session.commit()
+                await session.refresh(persona)
+                return persona.persona_id
+        return self._run_async(_create())
+    
+    def get_persona(self, project_name: str, persona_id: str) -> Optional[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return None
+                
+                result = await session.execute(
+                    select(Persona).where(
+                        Persona.persona_id == persona_id,
+                        Persona.project_id == project.id
+                    )
+                )
+                persona = result.scalar_one_or_none()
+                
+                if persona:
+                    return {
+                        "persona_id": persona.persona_id,
+                        "persona_name": persona.persona_name,
+                        "display_name": persona.display_name,
+                        "description": persona.description,
+                        "avatar_url": persona.avatar_url,
+                        "is_ai": persona.is_ai,
+                        "fallback_actor_id": str(persona.fallback_actor_id) if persona.fallback_actor_id else None,
+                        "extra_data": persona.extra_data,
+                        "created_at": persona.created_at.isoformat() if persona.created_at else None
+                    }
+                return None
+        return self._run_async(_get())
+    
+    def get_persona_by_name(self, project_name: str, persona_name: str) -> Optional[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return None
+                
+                result = await session.execute(
+                    select(Persona).where(
+                        Persona.persona_name == persona_name,
+                        Persona.project_id == project.id
+                    )
+                )
+                persona = result.scalar_one_or_none()
+                
+                if persona:
+                    return {
+                        "persona_id": persona.persona_id,
+                        "persona_name": persona.persona_name,
+                        "display_name": persona.display_name,
+                        "description": persona.description,
+                        "avatar_url": persona.avatar_url,
+                        "is_ai": persona.is_ai,
+                        "fallback_actor_id": str(persona.fallback_actor_id) if persona.fallback_actor_id else None,
+                        "extra_data": persona.extra_data,
+                        "created_at": persona.created_at.isoformat() if persona.created_at else None
+                    }
+                return None
+        return self._run_async(_get())
+    
+    def list_personas(self, project_name: str) -> List[Dict[str, Any]]:
+        async def _list():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return []
+                
+                result = await session.execute(
+                    select(Persona).where(Persona.project_id == project.id)
+                )
+                personas = result.scalars().all()
+                
+                return [
+                    {
+                        "persona_id": p.persona_id,
+                        "persona_name": p.persona_name,
+                        "display_name": p.display_name,
+                        "is_ai": p.is_ai,
+                        "created_at": p.created_at.isoformat() if p.created_at else None
+                    }
+                    for p in personas
+                ]
+        return self._run_async(_list())
+    
+    def delete_persona(self, project_name: str, persona_id: str) -> bool:
+        async def _delete():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return False
+                
+                result = await session.execute(
+                    delete(Persona).where(
+                        Persona.persona_id == persona_id,
+                        Persona.project_id == project.id
+                    )
+                )
+                await session.commit()
+                return result.rowcount > 0
+        return self._run_async(_delete())
+    
+    # ==================== Chat Session Operations ====================
+    
+    def create_chat_session(
+        self,
+        project_name: str,
+        actor_id: str,
+        persona_id: str,
+        session_name: Optional[str] = None
+    ) -> str:
+        async def _create():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    raise ValueError(f"Project '{project_name}' not found")
+                
+                chat_session = ChatSession(
+                    session_id=str(uuid_module.uuid4()),
+                    project_id=project.id,
+                    actor_id=int(actor_id),
+                    persona_id=persona_id,
+                    title=session_name
+                )
+                session.add(chat_session)
+                await session.commit()
+                await session.refresh(chat_session)
+                return chat_session.session_id
+        return self._run_async(_create())
+    
+    def get_chat_session(self, project_name: str, session_id: str) -> Optional[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return None
+                
+                result = await session.execute(
+                    select(ChatSession).where(
+                        ChatSession.session_id == session_id,
+                        ChatSession.project_id == project.id
+                    )
+                )
+                chat_session = result.scalar_one_or_none()
+                
+                if chat_session:
+                    return {
+                        "session_id": chat_session.session_id,
+                        "actor_id": str(chat_session.actor_id),
+                        "persona_id": chat_session.persona_id,
+                        "title": chat_session.title,
+                        "total_input_tokens": chat_session.total_input_tokens,
+                        "total_output_tokens": chat_session.total_output_tokens,
+                        "is_active": chat_session.is_active,
+                        "created_at": chat_session.created_at.isoformat() if chat_session.created_at else None,
+                        "updated_at": chat_session.updated_at.isoformat() if chat_session.updated_at else None
+                    }
+                return None
+        return self._run_async(_get())
+    
+    def list_chat_sessions(
+        self, 
+        project_name: str,
+        persona_id: Optional[str] = None,
+        actor_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        async def _list():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return []
+                
+                stmt = select(ChatSession).where(ChatSession.project_id == project.id)
+                
+                if persona_id:
+                    stmt = stmt.where(ChatSession.persona_id == persona_id)
+                if actor_id:
+                    stmt = stmt.where(ChatSession.actor_id == int(actor_id))
+                
+                result = await session.execute(stmt.order_by(ChatSession.updated_at.desc()))
+                sessions = result.scalars().all()
+                
+                return [
+                    {
+                        "session_id": s.session_id,
+                        "actor_id": str(s.actor_id),
+                        "persona_id": s.persona_id,
+                        "title": s.title,
+                        "total_input_tokens": s.total_input_tokens,
+                        "total_output_tokens": s.total_output_tokens,
+                        "is_active": s.is_active,
+                        "created_at": s.created_at.isoformat() if s.created_at else None,
+                        "updated_at": s.updated_at.isoformat() if s.updated_at else None
+                    }
+                    for s in sessions
+                ]
+        return self._run_async(_list())
+    
+    def update_session_tokens(
+        self,
+        project_name: str,
+        session_id: str,
+        input_tokens: int,
+        output_tokens: int
+    ) -> bool:
+        async def _update():
+            async with self.async_session() as session:
+                # Get current values and add
+                result = await session.execute(
+                    select(ChatSession).where(ChatSession.session_id == session_id)
+                )
+                chat_session = result.scalar_one_or_none()
+                
+                if not chat_session:
+                    return False
+                
+                chat_session.total_input_tokens += input_tokens
+                chat_session.total_output_tokens += output_tokens
+                await session.commit()
+                return True
+        return self._run_async(_update())
+    
+    def delete_chat_session(self, project_name: str, session_id: str) -> bool:
+        async def _delete():
+            async with self.async_session() as session:
+                project = (await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )).scalar_one_or_none()
+                
+                if not project:
+                    return False
+                
+                result = await session.execute(
+                    delete(ChatSession).where(
+                        ChatSession.session_id == session_id,
+                        ChatSession.project_id == project.id
+                    )
+                )
+                await session.commit()
+                return result.rowcount > 0
+        return self._run_async(_delete())
+    
+    # ==================== Chat Message Operations ====================
+    
+    def add_chat_message(
+        self,
+        project_name: str,
+        session_id: str,
+        role: str,
+        content: str,
+        token_count: int = 0,
+        context_used: Optional[Dict[str, Any]] = None,
+        generation_metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        async def _add():
+            async with self.async_session() as session:
+                message = ChatMessage(
+                    message_id=str(uuid_module.uuid4()),
+                    session_id=session_id,
+                    role=role,
+                    content=content,
+                    token_count=token_count,
+                    context_metadata=context_used,
+                    generation_metadata=generation_metadata
+                )
+                session.add(message)
+                await session.commit()
+                await session.refresh(message)
+                return message.message_id
+        return self._run_async(_add())
+    
+    def get_chat_history(
+        self,
+        project_name: str,
+        session_id: str,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                stmt = (
+                    select(ChatMessage)
+                    .where(ChatMessage.session_id == session_id)
+                    .order_by(ChatMessage.created_at)
+                )
+                
+                if limit:
+                    # Get last N messages
+                    stmt = (
+                        select(ChatMessage)
+                        .where(ChatMessage.session_id == session_id)
+                        .order_by(ChatMessage.created_at.desc())
+                        .limit(limit)
+                    )
+                
+                result = await session.execute(stmt)
+                messages = result.scalars().all()
+                
+                # If limited, reverse to get chronological order
+                if limit:
+                    messages = list(reversed(messages))
+                
+                return [
+                    {
+                        "message_id": m.message_id,
+                        "role": m.role,
+                        "content": m.content,
+                        "token_count": m.token_count,
+                        "context_metadata": m.context_metadata,
+                        "generation_metadata": m.generation_metadata,
+                        "created_at": m.created_at.isoformat() if m.created_at else None
+                    }
+                    for m in messages
+                ]
+        return self._run_async(_get())
+    
+    def get_chat_context_window(
+        self,
+        project_name: str,
+        session_id: str,
+        max_tokens: int
+    ) -> List[Dict[str, Any]]:
+        """Get most recent messages that fit within token budget."""
+        async def _get():
+            async with self.async_session() as session:
+                # Get messages in reverse order
+                stmt = (
+                    select(ChatMessage)
+                    .where(ChatMessage.session_id == session_id)
+                    .order_by(ChatMessage.created_at.desc())
+                )
+                
+                result = await session.execute(stmt)
+                messages = result.scalars().all()
+                
+                # Accumulate until token limit
+                selected = []
+                token_total = 0
+                
+                for m in messages:
+                    if token_total + m.token_count <= max_tokens:
+                        selected.append(m)
+                        token_total += m.token_count
+                    else:
+                        break
+                
+                # Reverse to chronological order
+                selected = list(reversed(selected))
+                
+                return [
+                    {
+                        "message_id": m.message_id,
+                        "role": m.role,
+                        "content": m.content,
+                        "token_count": m.token_count
+                    }
+                    for m in selected
+                ]
+        return self._run_async(_get())

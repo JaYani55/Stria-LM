@@ -23,6 +23,8 @@ from src.config import (
     set_env_variable,
     create_default_env,
     load_config,
+    save_config,
+    CONFIG_PATH,
 )
 from src.database import get_database
 
@@ -64,6 +66,7 @@ class ProjectManagerApp(tk.Tk):
         # Create tabs
         self._build_projects_tab()
         self._build_env_settings_tab()
+        self._build_inference_config_tab()
         self._build_database_config_tab()
         self._build_about_tab()
         
@@ -94,7 +97,7 @@ class ProjectManagerApp(tk.Tk):
         
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=False)
-        help_menu.add_command(label="About", command=lambda: self.notebook.select(3))
+        help_menu.add_command(label="About", command=lambda: self.notebook.select(4))
         menubar.add_cascade(label="Help", menu=help_menu)
         
         self.config(menu=menubar)
@@ -560,6 +563,330 @@ class ProjectManagerApp(tk.Tk):
             messagebox.showinfo("Import Complete", f"Project '{project_name}' has been imported successfully.")
         except Exception as e:
             messagebox.showerror("Import Failed", f"Failed to import project: {e}")
+    
+    # =========================================================================
+    # INFERENCE CONFIG TAB
+    # =========================================================================
+    
+    def _build_inference_config_tab(self):
+        """Build the Inference Server configuration tab."""
+        tab = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab, text="Inference")
+        
+        # Instructions
+        ttk.Label(
+            tab, 
+            text="Configure LLM inference server connection for chat and content generation.",
+            font=("Segoe UI", 9, "italic")
+        ).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Load current config
+        current_config = load_config()
+        inference_config = current_config.get("inference", {})
+        
+        # Connection Settings Frame
+        conn_frame = ttk.LabelFrame(tab, text="Connection Settings", padding=10)
+        conn_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Store entry widgets for inference settings
+        self.inference_entries = {}
+        
+        # Base URL
+        ttk.Label(conn_frame, text="Inference Server URL:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.inference_entries["base_url"] = ttk.Entry(conn_frame, width=50)
+        self.inference_entries["base_url"].grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.inference_entries["base_url"].insert(0, inference_config.get("base_url", "http://localhost:8080/v1"))
+        
+        ttk.Label(
+            conn_frame, 
+            text="OpenAI-compatible API endpoint (e.g., http://localhost:8080/v1, https://openrouter.ai/api/v1)",
+            font=("Segoe UI", 8, "italic"), foreground="gray"
+        ).grid(row=1, column=1, sticky=tk.W, padx=(10, 0))
+        
+        # Default Model
+        ttk.Label(conn_frame, text="Default Model:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.inference_entries["default_model"] = ttk.Entry(conn_frame, width=50)
+        self.inference_entries["default_model"].grid(row=2, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.inference_entries["default_model"].insert(0, inference_config.get("default_model", "gpt-4"))
+        
+        ttk.Label(
+            conn_frame, 
+            text="Model name as expected by the inference server (e.g., gpt-4, openai/gpt-4.1-nano)",
+            font=("Segoe UI", 8, "italic"), foreground="gray"
+        ).grid(row=3, column=1, sticky=tk.W, padx=(10, 0))
+        
+        # API Key (from .env)
+        ttk.Label(conn_frame, text="API Key:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.inference_entries["api_key"] = ttk.Entry(conn_frame, width=50, show="*")
+        self.inference_entries["api_key"].grid(row=4, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Load API key from env
+        env_vars = get_env_variables()
+        api_key = env_vars.get("INFERENCE_API_KEY", "") or env_vars.get("OPENROUTER_API_KEY", "")
+        self.inference_entries["api_key"].insert(0, api_key)
+        
+        ttk.Label(
+            conn_frame, 
+            text="API key for the inference server (stored securely in .env file)",
+            font=("Segoe UI", 8, "italic"), foreground="gray"
+        ).grid(row=5, column=1, sticky=tk.W, padx=(10, 0))
+        
+        # Show/Hide API key button
+        self.show_api_key_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            conn_frame, 
+            text="Show API Key", 
+            variable=self.show_api_key_var,
+            command=self._toggle_api_key_visibility
+        ).grid(row=4, column=2, padx=(5, 0))
+        
+        # Local Inference Server Settings Frame
+        local_frame = ttk.LabelFrame(tab, text="Local Inference Server Settings", padding=10)
+        local_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Default Host
+        ttk.Label(local_frame, text="Default Host:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.inference_entries["default_host"] = ttk.Entry(local_frame, width=30)
+        self.inference_entries["default_host"].grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.inference_entries["default_host"].insert(0, inference_config.get("default_host", "127.0.0.1"))
+        
+        # Default Port
+        ttk.Label(local_frame, text="Default Port:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.inference_entries["default_port"] = ttk.Entry(local_frame, width=10)
+        self.inference_entries["default_port"].grid(row=1, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.inference_entries["default_port"].insert(0, str(inference_config.get("default_port", 8008)))
+        
+        # Inference Model Name
+        ttk.Label(local_frame, text="Model Name:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.inference_entries["inference_model_name"] = ttk.Entry(local_frame, width=40)
+        self.inference_entries["inference_model_name"].grid(row=2, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.inference_entries["inference_model_name"].insert(0, inference_config.get("inference_model_name", "default-model"))
+        
+        # Inference Model Path
+        ttk.Label(local_frame, text="Model Path:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        model_path_frame = ttk.Frame(local_frame)
+        model_path_frame.grid(row=3, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        self.inference_entries["inference_model_path"] = ttk.Entry(model_path_frame, width=45)
+        self.inference_entries["inference_model_path"].pack(side=tk.LEFT)
+        self.inference_entries["inference_model_path"].insert(0, inference_config.get("inference_model_path", ""))
+        
+        ttk.Button(model_path_frame, text="Browse...", command=self._browse_model_path).pack(side=tk.LEFT, padx=(5, 0))
+        
+        ttk.Label(
+            local_frame, 
+            text="Path to local GGUF model file (for local inference servers)",
+            font=("Segoe UI", 8, "italic"), foreground="gray"
+        ).grid(row=4, column=1, sticky=tk.W, padx=(10, 0))
+        
+        # Preset buttons
+        preset_frame = ttk.LabelFrame(tab, text="Quick Presets", padding=10)
+        preset_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(
+            preset_frame, 
+            text="Local (localhost:8080)", 
+            command=lambda: self._apply_inference_preset("local")
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        ttk.Button(
+            preset_frame, 
+            text="OpenRouter", 
+            command=lambda: self._apply_inference_preset("openrouter")
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        ttk.Button(
+            preset_frame, 
+            text="OpenAI", 
+            command=lambda: self._apply_inference_preset("openai")
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        ttk.Button(
+            preset_frame, 
+            text="LM Studio", 
+            command=lambda: self._apply_inference_preset("lmstudio")
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Save button frame
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(btn_frame, text="Save Configuration", command=self._save_inference_config).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Test Connection", command=self._test_inference_connection).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Reload", command=self._reload_inference_config).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Open config.toml", command=self._open_config_file).pack(side=tk.RIGHT)
+    
+    def _toggle_api_key_visibility(self):
+        """Toggle API key visibility."""
+        if self.show_api_key_var.get():
+            self.inference_entries["api_key"].config(show="")
+        else:
+            self.inference_entries["api_key"].config(show="*")
+    
+    def _browse_model_path(self):
+        """Browse for a GGUF model file."""
+        file_path = filedialog.askopenfilename(
+            title="Select Model File",
+            filetypes=[("GGUF Models", "*.gguf"), ("All Files", "*.*")]
+        )
+        if file_path:
+            self.inference_entries["inference_model_path"].delete(0, tk.END)
+            self.inference_entries["inference_model_path"].insert(0, file_path)
+    
+    def _apply_inference_preset(self, preset: str):
+        """Apply a preset inference configuration."""
+        presets = {
+            "local": {
+                "base_url": "http://localhost:8080/v1",
+                "default_model": "local-model"
+            },
+            "openrouter": {
+                "base_url": "https://openrouter.ai/api/v1",
+                "default_model": "openai/gpt-4.1-nano"
+            },
+            "openai": {
+                "base_url": "https://api.openai.com/v1",
+                "default_model": "gpt-4"
+            },
+            "lmstudio": {
+                "base_url": "http://localhost:1234/v1",
+                "default_model": "local-model"
+            }
+        }
+        
+        if preset in presets:
+            config = presets[preset]
+            self.inference_entries["base_url"].delete(0, tk.END)
+            self.inference_entries["base_url"].insert(0, config["base_url"])
+            self.inference_entries["default_model"].delete(0, tk.END)
+            self.inference_entries["default_model"].insert(0, config["default_model"])
+            self.status_var.set(f"Applied {preset} preset - remember to save!")
+    
+    def _save_inference_config(self):
+        """Save inference configuration to config.toml and .env."""
+        try:
+            # Load current config
+            current_config = load_config()
+            
+            # Update inference section
+            if "inference" not in current_config:
+                current_config["inference"] = {}
+            
+            # Save config.toml values
+            current_config["inference"]["base_url"] = self.inference_entries["base_url"].get()
+            current_config["inference"]["default_model"] = self.inference_entries["default_model"].get()
+            current_config["inference"]["default_host"] = self.inference_entries["default_host"].get()
+            
+            try:
+                current_config["inference"]["default_port"] = int(self.inference_entries["default_port"].get())
+            except ValueError:
+                current_config["inference"]["default_port"] = 8008
+            
+            current_config["inference"]["inference_model_name"] = self.inference_entries["inference_model_name"].get()
+            current_config["inference"]["inference_model_path"] = self.inference_entries["inference_model_path"].get()
+            
+            # Save to config.toml
+            save_config(current_config)
+            
+            # Save API key to .env (more secure)
+            api_key = self.inference_entries["api_key"].get()
+            if api_key:
+                set_env_variable("INFERENCE_API_KEY", api_key)
+                # Also set OPENROUTER_API_KEY if using OpenRouter
+                if "openrouter" in self.inference_entries["base_url"].get().lower():
+                    set_env_variable("OPENROUTER_API_KEY", api_key)
+            
+            self.status_var.set("Inference configuration saved successfully.")
+            messagebox.showinfo(
+                "Configuration Saved", 
+                "Inference settings have been saved.\n\n"
+                "You may need to restart the application or API server for changes to take effect."
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save configuration: {e}")
+    
+    def _reload_inference_config(self):
+        """Reload inference configuration from files."""
+        try:
+            current_config = load_config()
+            inference_config = current_config.get("inference", {})
+            env_vars = get_env_variables()
+            
+            # Update entries
+            for key in ["base_url", "default_model", "default_host", "inference_model_name", "inference_model_path"]:
+                if key in self.inference_entries:
+                    self.inference_entries[key].delete(0, tk.END)
+                    self.inference_entries[key].insert(0, str(inference_config.get(key, "")))
+            
+            self.inference_entries["default_port"].delete(0, tk.END)
+            self.inference_entries["default_port"].insert(0, str(inference_config.get("default_port", 8008)))
+            
+            # Reload API key from env
+            api_key = env_vars.get("INFERENCE_API_KEY", "") or env_vars.get("OPENROUTER_API_KEY", "")
+            self.inference_entries["api_key"].delete(0, tk.END)
+            self.inference_entries["api_key"].insert(0, api_key)
+            
+            self.status_var.set("Inference configuration reloaded.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to reload configuration: {e}")
+    
+    def _test_inference_connection(self):
+        """Test connection to the inference server."""
+        base_url = self.inference_entries["base_url"].get().rstrip("/")
+        api_key = self.inference_entries["api_key"].get()
+        
+        def test_task():
+            try:
+                import httpx
+                
+                headers = {"Content-Type": "application/json"}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                
+                # Try to hit the models endpoint
+                with httpx.Client(timeout=10.0) as client:
+                    response = client.get(f"{base_url}/models", headers=headers)
+                    
+                    if response.status_code == 200:
+                        models = response.json()
+                        model_count = len(models.get("data", []))
+                        self.after(0, lambda: self._show_connection_success(model_count))
+                    else:
+                        self.after(0, lambda: self._show_connection_error(
+                            f"Server returned status {response.status_code}"
+                        ))
+            except httpx.ConnectError as e:
+                self.after(0, lambda: self._show_connection_error(
+                    f"Could not connect to server.\n\nMake sure the inference server is running at:\n{base_url}"
+                ))
+            except Exception as e:
+                self.after(0, lambda: self._show_connection_error(str(e)))
+        
+        self.status_var.set("Testing connection...")
+        threading.Thread(target=test_task, daemon=True).start()
+    
+    def _show_connection_success(self, model_count: int):
+        """Show connection success message."""
+        self.status_var.set("Connection successful!")
+        messagebox.showinfo(
+            "Connection Successful", 
+            f"Successfully connected to inference server!\n\n"
+            f"Available models: {model_count}"
+        )
+    
+    def _show_connection_error(self, error: str):
+        """Show connection error message."""
+        self.status_var.set("Connection failed.")
+        messagebox.showerror("Connection Failed", f"Failed to connect to inference server:\n\n{error}")
+    
+    def _open_config_file(self):
+        """Open the config.toml file in default text editor."""
+        if sys.platform == "win32":
+            os.startfile(str(CONFIG_PATH))
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(CONFIG_PATH)])
+        else:
+            subprocess.run(["xdg-open", str(CONFIG_PATH)])
     
     # =========================================================================
     # ABOUT TAB

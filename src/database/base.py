@@ -263,3 +263,235 @@ class DatabaseBackend(ABC):
     ) -> bool:
         """Execute an update on a specific cell."""
         pass
+    
+    # ==================== Actor Operations ====================
+    
+    @abstractmethod
+    def create_actor(
+        self, 
+        project_name: str,
+        actor_name: str,
+        description: str = "",
+        prompt_messages: Optional[List[Dict[str, str]]] = None,
+        model_name: str = "gpt-4",
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        top_p: float = 1.0,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
+        other_generation_parameters: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Create a new LLM actor for a project.
+        
+        Args:
+            project_name: Name of the project
+            actor_name: Unique name for this actor
+            description: Description of the actor's purpose
+            prompt_messages: List of system/context messages
+            model_name: LLM model identifier
+            temperature: Sampling temperature
+            max_tokens: Maximum response tokens
+            top_p: Nucleus sampling parameter
+            top_k: Top-k sampling parameter
+            repetition_penalty: Repetition penalty
+            other_generation_parameters: Additional generation params
+            
+        Returns:
+            UUID string of the created actor
+        """
+        pass
+    
+    @abstractmethod
+    def get_actor(self, project_name: str, actor_id: str) -> Optional[Dict[str, Any]]:
+        """Get an actor by ID."""
+        pass
+    
+    @abstractmethod
+    def get_actor_by_name(self, project_name: str, actor_name: str) -> Optional[Dict[str, Any]]:
+        """Get an actor by name."""
+        pass
+    
+    @abstractmethod
+    def list_actors(self, project_name: str) -> List[Dict[str, Any]]:
+        """List all actors for a project."""
+        pass
+    
+    @abstractmethod
+    def update_actor(
+        self, 
+        project_name: str, 
+        actor_id: str, 
+        updates: Dict[str, Any]
+    ) -> bool:
+        """Update an actor's properties."""
+        pass
+    
+    @abstractmethod
+    def delete_actor(self, project_name: str, actor_id: str) -> bool:
+        """Delete an actor."""
+        pass
+    
+    # ==================== Persona Operations ====================
+    
+    @abstractmethod
+    def create_persona(
+        self, 
+        project_name: str,
+        persona_name: str,
+        display_name: str,
+        is_ai: bool = False,
+        fallback_actor_id: Optional[str] = None
+    ) -> str:
+        """
+        Create a persona for chat sessions.
+        
+        Args:
+            project_name: Name of the project
+            persona_name: Unique identifier for this persona
+            display_name: Display name shown in chat
+            is_ai: Whether this persona represents an AI
+            fallback_actor_id: Optional actor ID for AI personas
+            
+        Returns:
+            UUID string of the created persona
+        """
+        pass
+    
+    @abstractmethod
+    def get_persona(self, project_name: str, persona_id: str) -> Optional[Dict[str, Any]]:
+        """Get a persona by ID."""
+        pass
+    
+    @abstractmethod
+    def get_persona_by_name(self, project_name: str, persona_name: str) -> Optional[Dict[str, Any]]:
+        """Get a persona by name."""
+        pass
+    
+    @abstractmethod
+    def list_personas(self, project_name: str) -> List[Dict[str, Any]]:
+        """List all personas for a project."""
+        pass
+    
+    @abstractmethod
+    def delete_persona(self, project_name: str, persona_id: str) -> bool:
+        """Delete a persona."""
+        pass
+    
+    # ==================== Chat Session Operations ====================
+    
+    @abstractmethod
+    def create_chat_session(
+        self,
+        project_name: str,
+        actor_id: str,
+        persona_id: str,
+        session_name: Optional[str] = None
+    ) -> str:
+        """
+        Create a new chat session.
+        
+        Args:
+            project_name: Name of the project
+            actor_id: UUID of the actor for this session
+            persona_id: UUID of the persona (user)
+            session_name: Optional name for the session
+            
+        Returns:
+            UUID string of the created session
+        """
+        pass
+    
+    @abstractmethod
+    def get_chat_session(self, project_name: str, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get a chat session by ID."""
+        pass
+    
+    @abstractmethod
+    def list_chat_sessions(
+        self, 
+        project_name: str,
+        persona_id: Optional[str] = None,
+        actor_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """List chat sessions, optionally filtered by persona or actor."""
+        pass
+    
+    @abstractmethod
+    def update_session_tokens(
+        self,
+        project_name: str,
+        session_id: str,
+        input_tokens: int,
+        output_tokens: int
+    ) -> bool:
+        """Update token counts for a session."""
+        pass
+    
+    @abstractmethod
+    def delete_chat_session(self, project_name: str, session_id: str) -> bool:
+        """Delete a chat session and all its messages."""
+        pass
+    
+    # ==================== Chat Message Operations ====================
+    
+    @abstractmethod
+    def add_chat_message(
+        self,
+        project_name: str,
+        session_id: str,
+        role: str,
+        content: str,
+        token_count: int = 0,
+        context_used: Optional[Dict[str, Any]] = None,
+        generation_metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        """
+        Add a message to a chat session.
+        
+        Args:
+            project_name: Name of the project
+            session_id: UUID of the chat session
+            role: Message role (user, assistant, system)
+            content: Message content
+            token_count: Number of tokens in the message
+            context_used: Metadata about context retrieved for this message
+            generation_metadata: LLM generation metadata (tokens, latency, etc.)
+            
+        Returns:
+            ID of the created message
+        """
+        pass
+    
+    @abstractmethod
+    def get_chat_history(
+        self,
+        project_name: str,
+        session_id: str,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get chat history for a session.
+        
+        Args:
+            project_name: Name of the project
+            session_id: UUID of the chat session
+            limit: Optional limit on number of messages (most recent)
+            
+        Returns:
+            List of messages in chronological order
+        """
+        pass
+    
+    @abstractmethod
+    def get_chat_context_window(
+        self,
+        project_name: str,
+        session_id: str,
+        max_tokens: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Get chat history that fits within a token budget.
+        Returns most recent messages that fit within max_tokens.
+        """
+        pass

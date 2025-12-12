@@ -5,6 +5,7 @@ Each project is stored as a separate .db file in the projects directory.
 
 import sqlite3
 import json
+import uuid as uuid_module
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
 import numpy as np
@@ -140,6 +141,70 @@ class SQLiteBackend(DatabaseBackend):
                 id INTEGER PRIMARY KEY,
                 prompt_data TEXT NOT NULL,
                 business_context TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create actors table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS actors (
+                actor_id INTEGER PRIMARY KEY,
+                actor_name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                prompt_messages TEXT NOT NULL DEFAULT '[]',
+                model_name TEXT NOT NULL,
+                temperature REAL DEFAULT 0.7,
+                max_tokens INTEGER DEFAULT 2048,
+                top_p REAL DEFAULT 1.0,
+                top_k INTEGER,
+                repetition_penalty REAL,
+                other_generation_parameters TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create personas table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS personas (
+                persona_id TEXT PRIMARY KEY,
+                persona_name TEXT NOT NULL,
+                display_name TEXT,
+                description TEXT,
+                avatar_url TEXT,
+                is_ai INTEGER DEFAULT 0,
+                fallback_actor_id INTEGER REFERENCES actors(actor_id),
+                metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create chat sessions table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id TEXT PRIMARY KEY,
+                persona_id TEXT NOT NULL REFERENCES personas(persona_id),
+                actor_id INTEGER NOT NULL REFERENCES actors(actor_id),
+                title TEXT,
+                total_input_tokens INTEGER DEFAULT 0,
+                total_output_tokens INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create chat messages table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                message_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                token_count INTEGER DEFAULT 0,
+                context_metadata TEXT,
+                generation_metadata TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -650,3 +715,565 @@ class SQLiteBackend(DatabaseBackend):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(input_path, db_path)
         return True
+
+    # ==================== Actor Operations ====================
+    
+    def _ensure_actor_tables(self, conn: sqlite3.Connection):
+        """Ensure actor/persona/session tables exist (for existing projects)."""
+        cursor = conn.cursor()
+        
+        # Check if actors table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='actors'")
+        if not cursor.fetchone():
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS actors (
+                    actor_id INTEGER PRIMARY KEY,
+                    actor_name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    prompt_messages TEXT NOT NULL DEFAULT '[]',
+                    model_name TEXT NOT NULL,
+                    temperature REAL DEFAULT 0.7,
+                    max_tokens INTEGER DEFAULT 2048,
+                    top_p REAL DEFAULT 1.0,
+                    top_k INTEGER,
+                    repetition_penalty REAL,
+                    other_generation_parameters TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS personas (
+                    persona_id TEXT PRIMARY KEY,
+                    persona_name TEXT NOT NULL,
+                    display_name TEXT,
+                    description TEXT,
+                    avatar_url TEXT,
+                    is_ai INTEGER DEFAULT 0,
+                    fallback_actor_id INTEGER REFERENCES actors(actor_id),
+                    metadata TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    persona_id TEXT NOT NULL REFERENCES personas(persona_id),
+                    actor_id INTEGER NOT NULL REFERENCES actors(actor_id),
+                    title TEXT,
+                    total_input_tokens INTEGER DEFAULT 0,
+                    total_output_tokens INTEGER DEFAULT 0,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    message_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    token_count INTEGER DEFAULT 0,
+                    context_metadata TEXT,
+                    generation_metadata TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+    
+    def create_actor(
+        self, 
+        project_name: str,
+        actor_name: str,
+        description: str = "",
+        prompt_messages: Optional[List[Dict[str, str]]] = None,
+        model_name: str = "gpt-4",
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        top_p: float = 1.0,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
+        other_generation_parameters: Optional[Dict[str, Any]] = None
+    ) -> str:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO actors (
+                actor_name, description, prompt_messages, model_name,
+                temperature, max_tokens, top_p, top_k, repetition_penalty,
+                other_generation_parameters
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            actor_name,
+            description,
+            json.dumps(prompt_messages or []),
+            model_name,
+            temperature,
+            max_tokens,
+            top_p,
+            top_k,
+            repetition_penalty,
+            json.dumps(other_generation_parameters) if other_generation_parameters else None
+        ))
+        conn.commit()
+        return str(cursor.lastrowid)
+    
+    def get_actor(self, project_name: str, actor_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM actors WHERE actor_id = ?", (int(actor_id),))
+        row = cursor.fetchone()
+        
+        if row:
+            return {
+                "actor_id": str(row["actor_id"]),
+                "actor_name": row["actor_name"],
+                "description": row["description"],
+                "prompt_messages": json.loads(row["prompt_messages"]) if row["prompt_messages"] else [],
+                "model_name": row["model_name"],
+                "temperature": row["temperature"],
+                "max_tokens": row["max_tokens"],
+                "top_p": row["top_p"],
+                "top_k": row["top_k"],
+                "repetition_penalty": row["repetition_penalty"],
+                "other_generation_parameters": json.loads(row["other_generation_parameters"]) if row["other_generation_parameters"] else None,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
+        return None
+    
+    def get_actor_by_name(self, project_name: str, actor_name: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM actors WHERE actor_name = ?", (actor_name,))
+        row = cursor.fetchone()
+        
+        if row:
+            return {
+                "actor_id": str(row["actor_id"]),
+                "actor_name": row["actor_name"],
+                "description": row["description"],
+                "prompt_messages": json.loads(row["prompt_messages"]) if row["prompt_messages"] else [],
+                "model_name": row["model_name"],
+                "temperature": row["temperature"],
+                "max_tokens": row["max_tokens"],
+                "top_p": row["top_p"],
+                "top_k": row["top_k"],
+                "repetition_penalty": row["repetition_penalty"],
+                "other_generation_parameters": json.loads(row["other_generation_parameters"]) if row["other_generation_parameters"] else None,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
+        return None
+    
+    def list_actors(self, project_name: str) -> List[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM actors ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        
+        return [
+            {
+                "actor_id": str(row["actor_id"]),
+                "actor_name": row["actor_name"],
+                "description": row["description"],
+                "model_name": row["model_name"],
+                "temperature": row["temperature"],
+                "max_tokens": row["max_tokens"],
+                "created_at": row["created_at"]
+            }
+            for row in rows
+        ]
+    
+    def update_actor(self, project_name: str, actor_id: str, updates: Dict[str, Any]) -> bool:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        valid_columns = {
+            'actor_name', 'description', 'prompt_messages', 'model_name',
+            'temperature', 'max_tokens', 'top_p', 'top_k', 
+            'repetition_penalty', 'other_generation_parameters'
+        }
+        
+        set_parts = []
+        values = []
+        for k, v in updates.items():
+            if k in valid_columns:
+                set_parts.append(f"{k} = ?")
+                if k in ('prompt_messages', 'other_generation_parameters') and isinstance(v, (dict, list)):
+                    values.append(json.dumps(v))
+                else:
+                    values.append(v)
+        
+        if not set_parts:
+            return False
+        
+        set_parts.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(int(actor_id))
+        
+        cursor.execute(
+            f"UPDATE actors SET {', '.join(set_parts)} WHERE actor_id = ?",
+            values
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def delete_actor(self, project_name: str, actor_id: str) -> bool:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM actors WHERE actor_id = ?", (int(actor_id),))
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    # ==================== Persona Operations ====================
+    
+    def create_persona(
+        self, 
+        project_name: str,
+        persona_name: str,
+        display_name: str,
+        is_ai: bool = False,
+        fallback_actor_id: Optional[str] = None
+    ) -> str:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        persona_id = str(uuid_module.uuid4())
+        
+        cursor.execute("""
+            INSERT INTO personas (persona_id, persona_name, display_name, is_ai, fallback_actor_id)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            persona_id,
+            persona_name,
+            display_name,
+            1 if is_ai else 0,
+            int(fallback_actor_id) if fallback_actor_id else None
+        ))
+        conn.commit()
+        return persona_id
+    
+    def get_persona(self, project_name: str, persona_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM personas WHERE persona_id = ?", (persona_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            return {
+                "persona_id": row["persona_id"],
+                "persona_name": row["persona_name"],
+                "display_name": row["display_name"],
+                "description": row["description"],
+                "avatar_url": row["avatar_url"],
+                "is_ai": bool(row["is_ai"]),
+                "fallback_actor_id": str(row["fallback_actor_id"]) if row["fallback_actor_id"] else None,
+                "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+                "created_at": row["created_at"]
+            }
+        return None
+    
+    def get_persona_by_name(self, project_name: str, persona_name: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM personas WHERE persona_name = ?", (persona_name,))
+        row = cursor.fetchone()
+        
+        if row:
+            return {
+                "persona_id": row["persona_id"],
+                "persona_name": row["persona_name"],
+                "display_name": row["display_name"],
+                "description": row["description"],
+                "avatar_url": row["avatar_url"],
+                "is_ai": bool(row["is_ai"]),
+                "fallback_actor_id": str(row["fallback_actor_id"]) if row["fallback_actor_id"] else None,
+                "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+                "created_at": row["created_at"]
+            }
+        return None
+    
+    def list_personas(self, project_name: str) -> List[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM personas ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        
+        return [
+            {
+                "persona_id": row["persona_id"],
+                "persona_name": row["persona_name"],
+                "display_name": row["display_name"],
+                "is_ai": bool(row["is_ai"]),
+                "created_at": row["created_at"]
+            }
+            for row in rows
+        ]
+    
+    def delete_persona(self, project_name: str, persona_id: str) -> bool:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM personas WHERE persona_id = ?", (persona_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    # ==================== Chat Session Operations ====================
+    
+    def create_chat_session(
+        self,
+        project_name: str,
+        actor_id: str,
+        persona_id: str,
+        session_name: Optional[str] = None
+    ) -> str:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        session_id = str(uuid_module.uuid4())
+        
+        cursor.execute("""
+            INSERT INTO chat_sessions (session_id, persona_id, actor_id, title)
+            VALUES (?, ?, ?, ?)
+        """, (session_id, persona_id, int(actor_id), session_name))
+        conn.commit()
+        return session_id
+    
+    def get_chat_session(self, project_name: str, session_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM chat_sessions WHERE session_id = ?", (session_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            return {
+                "session_id": row["session_id"],
+                "actor_id": str(row["actor_id"]),
+                "persona_id": row["persona_id"],
+                "title": row["title"],
+                "total_input_tokens": row["total_input_tokens"],
+                "total_output_tokens": row["total_output_tokens"],
+                "is_active": bool(row["is_active"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
+        return None
+    
+    def list_chat_sessions(
+        self, 
+        project_name: str,
+        persona_id: Optional[str] = None,
+        actor_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        sql = "SELECT * FROM chat_sessions WHERE 1=1"
+        params = []
+        
+        if persona_id:
+            sql += " AND persona_id = ?"
+            params.append(persona_id)
+        if actor_id:
+            sql += " AND actor_id = ?"
+            params.append(int(actor_id))
+        
+        sql += " ORDER BY updated_at DESC"
+        
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        
+        return [
+            {
+                "session_id": row["session_id"],
+                "actor_id": str(row["actor_id"]),
+                "persona_id": row["persona_id"],
+                "title": row["title"],
+                "total_input_tokens": row["total_input_tokens"],
+                "total_output_tokens": row["total_output_tokens"],
+                "is_active": bool(row["is_active"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
+            for row in rows
+        ]
+    
+    def update_session_tokens(
+        self,
+        project_name: str,
+        session_id: str,
+        input_tokens: int,
+        output_tokens: int
+    ) -> bool:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE chat_sessions 
+            SET total_input_tokens = total_input_tokens + ?,
+                total_output_tokens = total_output_tokens + ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE session_id = ?
+        """, (input_tokens, output_tokens, session_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def delete_chat_session(self, project_name: str, session_id: str) -> bool:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        # Delete messages first (no cascade in SQLite by default)
+        cursor.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+        cursor.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    # ==================== Chat Message Operations ====================
+    
+    def add_chat_message(
+        self,
+        project_name: str,
+        session_id: str,
+        role: str,
+        content: str,
+        token_count: int = 0,
+        context_used: Optional[Dict[str, Any]] = None,
+        generation_metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        message_id = str(uuid_module.uuid4())
+        
+        cursor.execute("""
+            INSERT INTO chat_messages (
+                message_id, session_id, role, content, token_count,
+                context_metadata, generation_metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            message_id,
+            session_id,
+            role,
+            content,
+            token_count,
+            json.dumps(context_used) if context_used else None,
+            json.dumps(generation_metadata) if generation_metadata else None
+        ))
+        
+        # Update session timestamp
+        cursor.execute(
+            "UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+            (session_id,)
+        )
+        conn.commit()
+        return message_id
+    
+    def get_chat_history(
+        self,
+        project_name: str,
+        session_id: str,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        if limit:
+            # Get last N messages
+            cursor.execute("""
+                SELECT * FROM chat_messages 
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (session_id, limit))
+            rows = list(reversed(cursor.fetchall()))
+        else:
+            cursor.execute("""
+                SELECT * FROM chat_messages 
+                WHERE session_id = ?
+                ORDER BY created_at ASC
+            """, (session_id,))
+            rows = cursor.fetchall()
+        
+        return [
+            {
+                "message_id": row["message_id"],
+                "role": row["role"],
+                "content": row["content"],
+                "token_count": row["token_count"],
+                "context_metadata": json.loads(row["context_metadata"]) if row["context_metadata"] else None,
+                "generation_metadata": json.loads(row["generation_metadata"]) if row["generation_metadata"] else None,
+                "created_at": row["created_at"]
+            }
+            for row in rows
+        ]
+    
+    def get_chat_context_window(
+        self,
+        project_name: str,
+        session_id: str,
+        max_tokens: int
+    ) -> List[Dict[str, Any]]:
+        """Get most recent messages that fit within token budget."""
+        conn = self._get_connection(project_name)
+        self._ensure_actor_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM chat_messages 
+            WHERE session_id = ?
+            ORDER BY created_at DESC
+        """, (session_id,))
+        
+        rows = cursor.fetchall()
+        
+        selected = []
+        token_total = 0
+        
+        for row in rows:
+            if token_total + row["token_count"] <= max_tokens:
+                selected.append(row)
+                token_total += row["token_count"]
+            else:
+                break
+        
+        # Reverse to chronological order
+        selected = list(reversed(selected))
+        
+        return [
+            {
+                "message_id": row["message_id"],
+                "role": row["role"],
+                "content": row["content"],
+                "token_count": row["token_count"]
+            }
+            for row in selected
+        ]

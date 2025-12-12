@@ -14,10 +14,22 @@ import json
 # Ensure src module can be imported
 sys.path.append(os.getcwd())
 
-from src.config import PROJECTS_DIR, DATABASE_TYPE, EMBEDDING_MODELS
+from src.config import PROJECTS_DIR, DATABASE_TYPE, EMBEDDING_MODELS, get_config_value
 from src.database import get_database
 
 ROW_LIMIT = 200
+
+
+def init_session_state():
+    """Initialize session state variables."""
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = []
+    if "current_session_id" not in st.session_state:
+        st.session_state.current_session_id = None
+    if "current_actor_id" not in st.session_state:
+        st.session_state.current_actor_id = None
+    if "current_persona_id" not in st.session_state:
+        st.session_state.current_persona_id = None
 
 
 def main():
@@ -26,6 +38,8 @@ def main():
         page_icon="📊",
         layout="wide"
     )
+    
+    init_session_state()
     
     st.title("📊 Stria-LM Data Manager")
     st.caption(f"Database: {DATABASE_TYPE.upper()}")
@@ -71,9 +85,11 @@ def main():
         st.sidebar.warning(f"Could not load metadata: {e}")
 
     # Main content tabs
-    tab_qa, tab_search, tab_ops, tab_add = st.tabs([
+    tab_qa, tab_search, tab_chat, tab_actors, tab_ops, tab_add = st.tabs([
         "📝 Q&A Pairs", 
-        "🔍 Semantic Search", 
+        "🔍 Semantic Search",
+        "💬 Chat",
+        "🎭 Actors",
         "⚙️ Operations",
         "➕ Add Data"
     ])
@@ -110,7 +126,7 @@ def main():
                         df[display_columns],
                         key=f"qa_editor_{selected_project}",
                         num_rows="fixed",
-                        use_container_width=True
+                        width='stretch'
                     )
                     
                     # Save changes button
@@ -188,6 +204,277 @@ def main():
                                         
                     except Exception as e:
                         st.error(f"Search failed: {e}")
+
+    # ==========================================================================
+    # CHAT TAB
+    # ==========================================================================
+    with tab_chat:
+        st.subheader("💬 Chat with LLM")
+        st.write("Chat with an AI assistant using your Q&A pairs as context.")
+        
+        # Actor and session selection
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            actors = db.list_actors(selected_project)
+            if not actors:
+                st.warning("No actors found. Create an actor first in the Actors tab.")
+            else:
+                actor_options = {a["actor_name"]: a["actor_id"] for a in actors}
+                selected_actor_name = st.selectbox(
+                    "Select Actor",
+                    list(actor_options.keys()),
+                    key="chat_actor_select"
+                )
+                if selected_actor_name:
+                    st.session_state.current_actor_id = actor_options[selected_actor_name]
+        
+        with col2:
+            personas = db.list_personas(selected_project)
+            if not personas:
+                # Create default persona
+                if st.button("Create Default Persona"):
+                    persona_id = db.create_persona(
+                        selected_project,
+                        "user",
+                        "User",
+                        is_ai=False
+                    )
+                    st.success("Default persona created!")
+                    st.rerun()
+            else:
+                persona_options = {p["display_name"] or p["persona_name"]: p["persona_id"] for p in personas}
+                selected_persona_name = st.selectbox(
+                    "Select Persona",
+                    list(persona_options.keys()),
+                    key="chat_persona_select"
+                )
+                if selected_persona_name:
+                    st.session_state.current_persona_id = persona_options[selected_persona_name]
+        
+        # Session management
+        st.markdown("---")
+        
+        if st.session_state.current_actor_id and st.session_state.current_persona_id:
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                sessions = db.list_chat_sessions(
+                    selected_project,
+                    persona_id=st.session_state.current_persona_id,
+                    actor_id=st.session_state.current_actor_id
+                )
+                
+                if sessions:
+                    session_options = {s.get("title") or f"Session {s['session_id'][:8]}...": s["session_id"] for s in sessions}
+                    selected_session = st.selectbox(
+                        "Select Session",
+                        ["New Session"] + list(session_options.keys()),
+                        key="chat_session_select"
+                    )
+                    
+                    if selected_session != "New Session":
+                        st.session_state.current_session_id = session_options[selected_session]
+                        
+                        # Load chat history
+                        history = db.get_chat_history(selected_project, st.session_state.current_session_id)
+                        st.session_state.chat_messages = [
+                            {"role": m["role"], "content": m["content"]}
+                            for m in history if m["role"] in ("user", "assistant")
+                        ]
+                    else:
+                        st.session_state.current_session_id = None
+                        st.session_state.chat_messages = []
+                else:
+                    st.info("No sessions found. Start a new conversation below.")
+            
+            with col2:
+                if st.button("🔄 New Session", type="secondary"):
+                    st.session_state.current_session_id = None
+                    st.session_state.chat_messages = []
+                    st.rerun()
+            
+            # Chat interface
+            st.markdown("---")
+            
+            # Chat settings
+            with st.expander("⚙️ Chat Settings"):
+                use_context = st.checkbox("Use Q&A context", value=True)
+                context_top_k = st.slider("Context items", 1, 20, 5)
+                max_context_tokens = st.slider("Max context tokens", 500, 8000, 2000)
+            
+            # Display chat messages
+            chat_container = st.container()
+            
+            with chat_container:
+                for message in st.session_state.chat_messages:
+                    with st.chat_message(message["role"]):
+                        st.write(message["content"])
+            
+            # Chat input
+            if prompt := st.chat_input("Type your message..."):
+                # Add user message to display
+                st.session_state.chat_messages.append({"role": "user", "content": prompt})
+                
+                with st.chat_message("user"):
+                    st.write(prompt)
+                
+                # Create session if needed
+                if not st.session_state.current_session_id:
+                    session_id = db.create_chat_session(
+                        selected_project,
+                        actor_id=st.session_state.current_actor_id,
+                        persona_id=st.session_state.current_persona_id,
+                        session_name=prompt[:50] + "..." if len(prompt) > 50 else prompt
+                    )
+                    st.session_state.current_session_id = session_id
+                
+                # Send to LLM
+                with st.chat_message("assistant"):
+                    with st.spinner("Thinking..."):
+                        try:
+                            from src.services.llm_chat import create_chat_service
+                            
+                            chat_service = create_chat_service(db)
+                            
+                            result = chat_service.chat(
+                                project_name=selected_project,
+                                session_id=st.session_state.current_session_id,
+                                user_message=prompt,
+                                use_context=use_context,
+                                context_top_k=context_top_k,
+                                max_context_tokens=max_context_tokens
+                            )
+                            
+                            response = result["message"]
+                            st.write(response)
+                            
+                            # Show metadata
+                            st.caption(f"🎯 Model: {result['model']} | 📊 Tokens: {result['total_tokens']} | ⏱️ {result['latency_ms']:.0f}ms | 📚 Context: {result['context_used']} items")
+                            
+                            st.session_state.chat_messages.append({"role": "assistant", "content": response})
+                            
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+        else:
+            st.info("Select an actor and persona to start chatting.")
+
+    # ==========================================================================
+    # ACTORS TAB
+    # ==========================================================================
+    with tab_actors:
+        st.subheader("🎭 Actor Management")
+        st.write("Create and manage LLM actors with custom personas and settings.")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("### Create New Actor")
+            
+            with st.form("create_actor_form"):
+                actor_name = st.text_input("Actor Name", placeholder="e.g., Support Agent")
+                description = st.text_area("Description", placeholder="Describe the actor's purpose...")
+                
+                model_name = st.text_input("Model Name", value="gpt-4", help="OpenAI-compatible model name")
+                temperature = st.slider("Temperature", 0.0, 2.0, 0.7)
+                max_tokens = st.number_input("Max Tokens", 100, 16000, 2048)
+                
+                system_prompt = st.text_area(
+                    "System Prompt",
+                    placeholder="You are a helpful assistant...",
+                    height=150
+                )
+                
+                if st.form_submit_button("Create Actor", type="primary"):
+                    if not actor_name:
+                        st.error("Actor name is required.")
+                    else:
+                        try:
+                            prompt_messages = []
+                            if system_prompt:
+                                prompt_messages = [{"role": "system", "content": system_prompt}]
+                            
+                            actor_id = db.create_actor(
+                                project_name=selected_project,
+                                actor_name=actor_name,
+                                description=description,
+                                prompt_messages=prompt_messages,
+                                model_name=model_name,
+                                temperature=temperature,
+                                max_tokens=max_tokens
+                            )
+                            st.success(f"Actor '{actor_name}' created!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to create actor: {e}")
+        
+        with col2:
+            st.markdown("### Existing Actors")
+            
+            actors = db.list_actors(selected_project)
+            
+            if not actors:
+                st.info("No actors found. Create one to get started.")
+            else:
+                for actor in actors:
+                    with st.expander(f"🎭 {actor['actor_name']}"):
+                        st.write(f"**Description:** {actor.get('description', 'N/A')}")
+                        st.write(f"**Model:** {actor.get('model_name', 'N/A')}")
+                        st.write(f"**Temperature:** {actor.get('temperature', 'N/A')}")
+                        st.write(f"**Max Tokens:** {actor.get('max_tokens', 'N/A')}")
+                        
+                        if st.button("🗑️ Delete", key=f"delete_actor_{actor['actor_id']}"):
+                            db.delete_actor(selected_project, actor['actor_id'])
+                            st.success("Actor deleted!")
+                            st.rerun()
+        
+        # Personas section
+        st.markdown("---")
+        st.markdown("### 👤 Personas")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("#### Create Persona")
+            
+            with st.form("create_persona_form"):
+                persona_name = st.text_input("Persona Name", placeholder="e.g., customer")
+                display_name = st.text_input("Display Name", placeholder="e.g., Customer")
+                is_ai = st.checkbox("Is AI Persona")
+                
+                if st.form_submit_button("Create Persona"):
+                    if not persona_name or not display_name:
+                        st.error("Name and display name are required.")
+                    else:
+                        try:
+                            persona_id = db.create_persona(
+                                selected_project,
+                                persona_name=persona_name,
+                                display_name=display_name,
+                                is_ai=is_ai
+                            )
+                            st.success(f"Persona '{display_name}' created!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to create persona: {e}")
+        
+        with col2:
+            st.markdown("#### Existing Personas")
+            
+            personas = db.list_personas(selected_project)
+            
+            if not personas:
+                st.info("No personas found.")
+            else:
+                for persona in personas:
+                    with st.expander(f"👤 {persona.get('display_name', persona['persona_name'])}"):
+                        st.write(f"**Name:** {persona['persona_name']}")
+                        st.write(f"**Is AI:** {'Yes' if persona.get('is_ai') else 'No'}")
+                        
+                        if st.button("🗑️ Delete", key=f"delete_persona_{persona['persona_id']}"):
+                            db.delete_persona(selected_project, persona['persona_id'])
+                            st.success("Persona deleted!")
+                            st.rerun()
 
     # ==========================================================================
     # OPERATIONS TAB
