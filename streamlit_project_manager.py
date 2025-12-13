@@ -14,7 +14,7 @@ import json
 # Ensure src module can be imported
 sys.path.append(os.getcwd())
 
-from src.config import PROJECTS_DIR, DATABASE_TYPE, EMBEDDING_MODELS, get_config_value
+from src.config import PROJECTS_DIR, DATABASE_TYPE, EMBEDDING_MODELS, get_config_value, get_app_state, is_script_running
 from src.database import get_database
 
 ROW_LIMIT = 200
@@ -85,11 +85,12 @@ def main():
         st.sidebar.warning(f"Could not load metadata: {e}")
 
     # Main content tabs
-    tab_qa, tab_search, tab_chat, tab_actors, tab_ops, tab_add = st.tabs([
+    tab_qa, tab_search, tab_chat, tab_actors, tab_scripts, tab_ops, tab_add = st.tabs([
         "📝 Q&A Pairs", 
         "🔍 Semantic Search",
         "💬 Chat",
         "🎭 Actors",
+        "📜 Scripts",
         "⚙️ Operations",
         "➕ Add Data"
     ])
@@ -475,6 +476,182 @@ def main():
                             db.delete_persona(selected_project, persona['persona_id'])
                             st.success("Persona deleted!")
                             st.rerun()
+
+    # ==========================================================================
+    # SCRIPTS TAB
+    # ==========================================================================
+    with tab_scripts:
+        st.subheader("📜 Project Scripts")
+        st.write("View and execute custom scripts for this project.")
+        
+        # Check if script is running (from state file)
+        script_running, running_script_id = is_script_running()
+        if script_running:
+            st.warning(f"🔄 A script is currently running (ID: {running_script_id}). View in Project Manager for live output.")
+        
+        # Script type filter
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            script_type_filter = st.selectbox(
+                "Filter by Type",
+                ["All", "scraper", "data-manipulation", "ai-script", "migration"],
+                key="script_type_filter"
+            )
+        with col2:
+            show_disabled = st.checkbox("Show Disabled", value=False)
+        
+        # Get scripts
+        try:
+            filter_type = None if script_type_filter == "All" else script_type_filter
+            scripts = db.list_scripts(
+                selected_project, 
+                script_type=filter_type,
+                enabled_only=not show_disabled
+            )
+            
+            if not scripts:
+                st.info("No scripts found. Use the Project Manager (Tkinter) to create scripts.")
+            else:
+                st.markdown(f"**{len(scripts)} script(s) found**")
+                
+                # Script list
+                for script in scripts:
+                    with st.expander(
+                        f"{'✓' if script['is_enabled'] else '✗'} [{script['script_type'].upper()[:3]}] {script['script_name']}",
+                        expanded=False
+                    ):
+                        col1, col2 = st.columns([3, 1])
+                        
+                        with col1:
+                            st.write(f"**Description:** {script.get('description') or 'No description'}")
+                            st.write(f"**File:** `{script['file_path']}`")
+                            st.write(f"**Version:** {script.get('version', '1.0.0')}")
+                            st.write(f"**Created:** {script.get('created_at', 'N/A')}")
+                        
+                        with col2:
+                            # View code button
+                            if st.button("📄 View Code", key=f"view_{script['id']}"):
+                                scripts_dir = db.get_scripts_directory(selected_project)
+                                if scripts_dir:
+                                    script_path = Path(scripts_dir) / script['file_path']
+                                    if script_path.exists():
+                                        st.session_state[f"view_code_{script['id']}"] = script_path.read_text(encoding='utf-8')
+                                    else:
+                                        st.error("Script file not found")
+                            
+                            # Toggle enabled
+                            new_enabled = st.checkbox(
+                                "Enabled",
+                                value=script['is_enabled'],
+                                key=f"enabled_{script['id']}"
+                            )
+                            if new_enabled != script['is_enabled']:
+                                db.update_script(selected_project, script['id'], {"is_enabled": new_enabled})
+                                st.rerun()
+                        
+                        # Show code if requested
+                        code_key = f"view_code_{script['id']}"
+                        if code_key in st.session_state:
+                            st.code(st.session_state[code_key], language="python" if script['file_path'].endswith('.py') else "sql")
+                            if st.button("Hide Code", key=f"hide_{script['id']}"):
+                                del st.session_state[code_key]
+                                st.rerun()
+        
+        except Exception as e:
+            st.error(f"Error loading scripts: {e}")
+        
+        st.markdown("---")
+        
+        # Execution History section
+        st.markdown("### 📊 Execution History")
+        
+        try:
+            executions = db.get_script_executions(selected_project, limit=20)
+            
+            if not executions:
+                st.info("No execution history yet.")
+            else:
+                # Convert to dataframe for display
+                exec_df = pd.DataFrame(executions)
+                
+                # Format the display columns
+                display_cols = ['script_name', 'script_type', 'status', 'started_at', 'finished_at', 'exit_code']
+                exec_df_display = exec_df[display_cols].copy()
+                
+                # Status color coding
+                def status_badge(status):
+                    colors = {
+                        'running': '🔵',
+                        'success': '🟢',
+                        'failed': '🔴',
+                        'cancelled': '🟡'
+                    }
+                    return f"{colors.get(status, '⚪')} {status}"
+                
+                exec_df_display['status'] = exec_df_display['status'].apply(status_badge)
+                
+                st.dataframe(
+                    exec_df_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "script_name": "Script",
+                        "script_type": "Type",
+                        "status": "Status",
+                        "started_at": "Started",
+                        "finished_at": "Finished",
+                        "exit_code": "Exit Code"
+                    }
+                )
+                
+                # View execution details
+                st.markdown("#### Execution Details")
+                exec_id = st.selectbox(
+                    "Select execution to view details",
+                    options=[e['id'] for e in executions],
+                    format_func=lambda x: f"#{x} - {next((e['script_name'] for e in executions if e['id'] == x), 'Unknown')}"
+                )
+                
+                if exec_id:
+                    exec_data = next((e for e in executions if e['id'] == exec_id), None)
+                    if exec_data:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("**stdout:**")
+                            st.code(exec_data.get('stdout') or '(empty)', language=None)
+                        with col2:
+                            st.write("**stderr:**")
+                            st.code(exec_data.get('stderr') or '(empty)', language=None)
+                
+        except Exception as e:
+            st.error(f"Error loading execution history: {e}")
+        
+        st.markdown("---")
+        
+        # Migration status section
+        st.markdown("### 🔧 Migration Status")
+        
+        try:
+            migrations = db.get_applied_migrations(selected_project)
+            
+            if not migrations:
+                st.info("No migrations have been applied to this project.")
+            else:
+                st.write(f"**{len(migrations)} migration(s) applied**")
+                
+                migration_df = pd.DataFrame(migrations)
+                st.dataframe(
+                    migration_df[['version', 'script_name', 'applied_at']],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "version": "Version",
+                        "script_name": "Script",
+                        "applied_at": "Applied At"
+                    }
+                )
+        except Exception as e:
+            st.error(f"Error loading migrations: {e}")
 
     # ==========================================================================
     # OPERATIONS TAB

@@ -26,6 +26,8 @@ class Project(Base):
     actors: Mapped[List["Actor"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     personas: Mapped[List["Persona"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     chat_sessions: Mapped[List["ChatSession"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    scripts: Mapped[List["ProjectScript"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    schema_versions: Mapped[List["SchemaVersion"]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 class QAPair(Base):
     __tablename__ = "qa_pairs"
@@ -224,3 +226,74 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
+
+
+# =============================================================================
+# PROJECT SCRIPTS - Per-project custom scripts registry
+# =============================================================================
+
+class ProjectScript(Base):
+    """
+    Registry of custom scripts for a project.
+    Scripts can be scrapers, data-manipulation, ai-scripts, or migrations.
+    """
+    __tablename__ = "project_scripts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
+    script_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    script_type: Mapped[str] = mapped_column(String(50), nullable=False)  # scraper, data-manipulation, ai-script, migration
+    file_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    version: Mapped[str] = mapped_column(String(50), default="1.0.0")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    
+    # Additional metadata as JSONB (dependencies, schedule, etc.)
+    script_metadata: Mapped[Optional[dict]] = mapped_column(JSONB)
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    project: Mapped["Project"] = relationship(back_populates="scripts")
+    execution_logs: Mapped[List["ScriptExecutionLog"]] = relationship(
+        back_populates="script", 
+        cascade="all, delete-orphan"
+    )
+
+
+class ScriptExecutionLog(Base):
+    """
+    Execution log for project scripts.
+    Tracks script runs with status, output, and timing.
+    """
+    __tablename__ = "script_execution_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    script_id: Mapped[int] = mapped_column(ForeignKey("project_scripts.id"))
+    status: Mapped[str] = mapped_column(String(50), nullable=False)  # running, success, failed, cancelled
+    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    exit_code: Mapped[Optional[int]] = mapped_column(Integer)
+    stdout: Mapped[Optional[str]] = mapped_column(Text)
+    stderr: Mapped[Optional[str]] = mapped_column(Text)
+    
+    # Additional execution metadata
+    execution_metadata: Mapped[Optional[dict]] = mapped_column(JSONB)
+
+    script: Mapped["ProjectScript"] = relationship(back_populates="execution_logs")
+
+
+class SchemaVersion(Base):
+    """
+    Tracks applied migration scripts for version control.
+    """
+    __tablename__ = "schema_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
+    version: Mapped[str] = mapped_column(String(50), nullable=False)
+    script_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    applied_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    checksum: Mapped[Optional[str]] = mapped_column(String(64))  # SHA-256 hash of script content
+
+    project: Mapped["Project"] = relationship(back_populates="schema_versions")

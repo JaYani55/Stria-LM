@@ -182,3 +182,110 @@ def get_config_value(section: str, key: str, default=None):
 INFERENCE_BASE_URL = get_config_value("inference", "base_url", "http://localhost:8080/v1")
 INFERENCE_API_KEY = get_config_value("inference", "api_key", "")
 
+
+# --- State Bridge File ---
+# Used for communication between Tkinter and Streamlit applications
+STATE_FILE_PATH = Path(__file__).parent.parent / "state.json"
+
+
+def get_app_state() -> dict:
+    """
+    Get the current application state from state.json.
+    
+    Returns:
+        Dictionary with current state, or default state if file doesn't exist
+    """
+    import json
+    
+    default_state = {
+        "current_project": None,
+        "last_updated": None,
+        "script_running": False,
+        "running_script_id": None
+    }
+    
+    if not STATE_FILE_PATH.exists():
+        return default_state
+    
+    try:
+        with open(STATE_FILE_PATH, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return default_state
+
+
+def set_app_state(updates: dict) -> dict:
+    """
+    Update the application state in state.json.
+    
+    Args:
+        updates: Dictionary of state updates to apply
+        
+    Returns:
+        The updated state dictionary
+    """
+    import json
+    from datetime import datetime
+    
+    state = get_app_state()
+    state.update(updates)
+    state["last_updated"] = datetime.now().isoformat()
+    
+    with open(STATE_FILE_PATH, 'w') as f:
+        json.dump(state, f, indent=2)
+    
+    return state
+
+
+def set_current_project(project_name: str) -> dict:
+    """
+    Set the current active project in state.json.
+    This allows Streamlit to know which project is selected in Tkinter.
+    
+    Args:
+        project_name: Name of the project to set as current
+        
+    Returns:
+        The updated state dictionary
+    """
+    return set_app_state({"current_project": project_name})
+
+
+def get_current_project() -> str | None:
+    """
+    Get the current active project from state.json.
+    
+    Returns:
+        The current project name, or None if not set
+    """
+    state = get_app_state()
+    return state.get("current_project")
+
+
+def set_script_running(script_id: int | None, running: bool = True) -> dict:
+    """
+    Set the script running status in state.json.
+    
+    Args:
+        script_id: ID of the running script, or None if stopping
+        running: Whether a script is currently running
+        
+    Returns:
+        The updated state dictionary
+    """
+    return set_app_state({
+        "script_running": running,
+        "running_script_id": script_id if running else None
+    })
+
+
+def is_script_running() -> tuple[bool, int | None]:
+    """
+    Check if a script is currently running.
+    
+    Returns:
+        Tuple of (is_running, script_id)
+    """
+    state = get_app_state()
+    return state.get("script_running", False), state.get("running_script_id")
+

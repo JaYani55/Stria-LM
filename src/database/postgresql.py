@@ -15,7 +15,11 @@ from sqlalchemy import select, update, delete, func, text
 from sqlalchemy.exc import OperationalError
 
 from .base import DatabaseBackend
-from ..models_db import Base, Project, QAPair, ScrapedContent, PromptFile, Actor, Persona, ChatSession, ChatMessage
+from ..models_db import (
+    Base, Project, QAPair, ScrapedContent, PromptFile, 
+    Actor, Persona, ChatSession, ChatMessage,
+    ProjectScript, ScriptExecutionLog, SchemaVersion
+)
 
 
 class PostgreSQLBackend(DatabaseBackend):
@@ -127,6 +131,21 @@ class PostgreSQLBackend(DatabaseBackend):
                 if project:
                     await session.delete(project)
                     await session.commit()
+                    
+                    # Clean up scripts folder on filesystem
+                    from pathlib import Path
+                    from ..config import PROJECTS_DIR
+                    import shutil
+                    
+                    scripts_dir = Path(PROJECTS_DIR) / project_name / "scripts"
+                    if scripts_dir.exists():
+                        shutil.rmtree(scripts_dir)
+                    
+                    # Remove project directory if empty
+                    project_dir = Path(PROJECTS_DIR) / project_name
+                    if project_dir.exists() and not any(project_dir.iterdir()):
+                        project_dir.rmdir()
+                    
                     return True
                 return False
         return self._run_async(_delete())
@@ -1313,3 +1332,352 @@ class PostgreSQLBackend(DatabaseBackend):
                     for m in selected
                 ]
         return self._run_async(_get())
+    
+    # ==================== Script Operations ====================
+    
+    def register_script(
+        self,
+        project_name: str,
+        script_name: str,
+        script_type: str,
+        file_path: str,
+        description: str = "",
+        version: str = "1.0.0",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        async def _register():
+            async with self.async_session() as session:
+                # Get project
+                result = await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )
+                project = result.scalar_one_or_none()
+                if not project:
+                    raise ValueError(f"Project '{project_name}' not found")
+                
+                script = ProjectScript(
+                    project_id=project.id,
+                    script_name=script_name,
+                    script_type=script_type,
+                    file_path=file_path,
+                    description=description,
+                    version=version,
+                    script_metadata=metadata
+                )
+                session.add(script)
+                await session.commit()
+                await session.refresh(script)
+                return script.id
+        return self._run_async(_register())
+    
+    def get_script(self, project_name: str, script_id: int) -> Optional[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                result = await session.execute(
+                    select(ProjectScript).where(ProjectScript.id == script_id)
+                )
+                script = result.scalar_one_or_none()
+                
+                if not script:
+                    return None
+                
+                return {
+                    "id": script.id,
+                    "script_name": script.script_name,
+                    "script_type": script.script_type,
+                    "file_path": script.file_path,
+                    "description": script.description,
+                    "version": script.version,
+                    "is_enabled": script.is_enabled,
+                    "created_at": script.created_at.isoformat() if script.created_at else None,
+                    "updated_at": script.updated_at.isoformat() if script.updated_at else None,
+                    "metadata": script.script_metadata
+                }
+        return self._run_async(_get())
+    
+    def list_scripts(
+        self,
+        project_name: str,
+        script_type: Optional[str] = None,
+        enabled_only: bool = True
+    ) -> List[Dict[str, Any]]:
+        async def _list():
+            async with self.async_session() as session:
+                # Get project
+                result = await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )
+                project = result.scalar_one_or_none()
+                if not project:
+                    return []
+                
+                stmt = select(ProjectScript).where(ProjectScript.project_id == project.id)
+                
+                if script_type:
+                    stmt = stmt.where(ProjectScript.script_type == script_type)
+                
+                if enabled_only:
+                    stmt = stmt.where(ProjectScript.is_enabled == True)
+                
+                stmt = stmt.order_by(ProjectScript.script_type, ProjectScript.script_name)
+                
+                result = await session.execute(stmt)
+                scripts = result.scalars().all()
+                
+                return [
+                    {
+                        "id": s.id,
+                        "script_name": s.script_name,
+                        "script_type": s.script_type,
+                        "file_path": s.file_path,
+                        "description": s.description,
+                        "version": s.version,
+                        "is_enabled": s.is_enabled,
+                        "created_at": s.created_at.isoformat() if s.created_at else None,
+                        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                        "metadata": s.script_metadata
+                    }
+                    for s in scripts
+                ]
+        return self._run_async(_list())
+    
+    def update_script(
+        self,
+        project_name: str,
+        script_id: int,
+        updates: Dict[str, Any]
+    ) -> bool:
+        async def _update():
+            async with self.async_session() as session:
+                result = await session.execute(
+                    select(ProjectScript).where(ProjectScript.id == script_id)
+                )
+                script = result.scalar_one_or_none()
+                
+                if not script:
+                    return False
+                
+                allowed_fields = {
+                    "script_name", "script_type", "file_path", "description",
+                    "version", "is_enabled", "metadata"
+                }
+                
+                for key, value in updates.items():
+                    if key not in allowed_fields:
+                        continue
+                    if key == "metadata":
+                        setattr(script, "script_metadata", value)
+                    else:
+                        setattr(script, key, value)
+                
+                await session.commit()
+                return True
+        return self._run_async(_update())
+    
+    def delete_script(self, project_name: str, script_id: int) -> bool:
+        async def _delete():
+            async with self.async_session() as session:
+                # Delete execution logs first
+                await session.execute(
+                    delete(ScriptExecutionLog).where(ScriptExecutionLog.script_id == script_id)
+                )
+                
+                result = await session.execute(
+                    delete(ProjectScript).where(ProjectScript.id == script_id)
+                )
+                await session.commit()
+                return result.rowcount > 0
+        return self._run_async(_delete())
+    
+    def log_script_execution(
+        self,
+        project_name: str,
+        script_id: int,
+        status: str,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        async def _log():
+            async with self.async_session() as session:
+                from datetime import datetime
+                
+                log_entry = ScriptExecutionLog(
+                    script_id=script_id,
+                    status=status,
+                    exit_code=exit_code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    execution_metadata=metadata,
+                    finished_at=None if status == "running" else datetime.now()
+                )
+                session.add(log_entry)
+                await session.commit()
+                await session.refresh(log_entry)
+                return log_entry.id
+        return self._run_async(_log())
+    
+    def update_script_execution(
+        self,
+        project_name: str,
+        execution_id: int,
+        status: str,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None
+    ) -> bool:
+        async def _update():
+            async with self.async_session() as session:
+                from datetime import datetime
+                
+                result = await session.execute(
+                    select(ScriptExecutionLog).where(ScriptExecutionLog.id == execution_id)
+                )
+                log_entry = result.scalar_one_or_none()
+                
+                if not log_entry:
+                    return False
+                
+                log_entry.status = status
+                log_entry.finished_at = datetime.now()
+                log_entry.exit_code = exit_code
+                log_entry.stdout = stdout
+                log_entry.stderr = stderr
+                
+                await session.commit()
+                return True
+        return self._run_async(_update())
+    
+    def get_script_executions(
+        self,
+        project_name: str,
+        script_id: Optional[int] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                # Get project to filter by
+                result = await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )
+                project = result.scalar_one_or_none()
+                if not project:
+                    return []
+                
+                # Get scripts for this project
+                scripts_stmt = select(ProjectScript.id).where(ProjectScript.project_id == project.id)
+                
+                stmt = (
+                    select(ScriptExecutionLog, ProjectScript.script_name, ProjectScript.script_type)
+                    .join(ProjectScript, ScriptExecutionLog.script_id == ProjectScript.id)
+                    .where(ProjectScript.project_id == project.id)
+                )
+                
+                if script_id:
+                    stmt = stmt.where(ScriptExecutionLog.script_id == script_id)
+                
+                stmt = stmt.order_by(ScriptExecutionLog.started_at.desc()).limit(limit)
+                
+                result = await session.execute(stmt)
+                rows = result.all()
+                
+                return [
+                    {
+                        "id": row[0].id,
+                        "script_id": row[0].script_id,
+                        "script_name": row[1],
+                        "script_type": row[2],
+                        "status": row[0].status,
+                        "started_at": row[0].started_at.isoformat() if row[0].started_at else None,
+                        "finished_at": row[0].finished_at.isoformat() if row[0].finished_at else None,
+                        "exit_code": row[0].exit_code,
+                        "stdout": row[0].stdout,
+                        "stderr": row[0].stderr,
+                        "metadata": row[0].execution_metadata
+                    }
+                    for row in rows
+                ]
+        return self._run_async(_get())
+    
+    # ==================== Migration Operations ====================
+    
+    def get_applied_migrations(self, project_name: str) -> List[Dict[str, Any]]:
+        async def _get():
+            async with self.async_session() as session:
+                # Get project
+                result = await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )
+                project = result.scalar_one_or_none()
+                if not project:
+                    return []
+                
+                stmt = (
+                    select(SchemaVersion)
+                    .where(SchemaVersion.project_id == project.id)
+                    .order_by(SchemaVersion.applied_at)
+                )
+                
+                result = await session.execute(stmt)
+                versions = result.scalars().all()
+                
+                return [
+                    {
+                        "id": v.id,
+                        "version": v.version,
+                        "script_name": v.script_name,
+                        "applied_at": v.applied_at.isoformat() if v.applied_at else None,
+                        "checksum": v.checksum
+                    }
+                    for v in versions
+                ]
+        return self._run_async(_get())
+    
+    def record_migration(
+        self,
+        project_name: str,
+        version: str,
+        script_name: str,
+        checksum: Optional[str] = None
+    ) -> int:
+        async def _record():
+            async with self.async_session() as session:
+                # Get project
+                result = await session.execute(
+                    select(Project).where(Project.name == project_name)
+                )
+                project = result.scalar_one_or_none()
+                if not project:
+                    raise ValueError(f"Project '{project_name}' not found")
+                
+                schema_version = SchemaVersion(
+                    project_id=project.id,
+                    version=version,
+                    script_name=script_name,
+                    checksum=checksum
+                )
+                session.add(schema_version)
+                await session.commit()
+                await session.refresh(schema_version)
+                return schema_version.id
+        return self._run_async(_record())
+    
+    def get_scripts_directory(self, project_name: str) -> Optional[str]:
+        """
+        Get the scripts directory for a project.
+        For PostgreSQL, scripts are stored in a shared location.
+        """
+        from pathlib import Path
+        from ..config import PROJECTS_DIR
+        
+        # Use a scripts folder within the projects directory
+        scripts_dir = Path(PROJECTS_DIR) / project_name / "scripts"
+        
+        # Create if it doesn't exist
+        if not scripts_dir.exists():
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            for subdir in ['scrapers', 'data-manipulation', 'ai-scripts', 'migrations']:
+                (scripts_dir / subdir).mkdir(exist_ok=True)
+        
+        return str(scripts_dir)

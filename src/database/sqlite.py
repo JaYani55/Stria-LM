@@ -89,8 +89,26 @@ class SQLiteBackend(DatabaseBackend):
         if db_path.exists():
             raise ValueError(f"Project '{project_name}' already exists.")
         
+        # Create project directory structure
+        project_dir = db_path.parent
+        project_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create script subdirectories
+        script_dirs = ['scrapers', 'data-manipulation', 'ai-scripts', 'migrations']
+        scripts_base = project_dir / 'scripts'
+        scripts_base.mkdir(exist_ok=True)
+        for subdir in script_dirs:
+            subdir_path = scripts_base / subdir
+            subdir_path.mkdir(exist_ok=True)
+        
+        # Create template files in script directories
+        self._create_script_templates(scripts_base)
+        
         conn = self._create_new_connection(db_path)
         cursor = conn.cursor()
+        
+        # Enable WAL mode for concurrent read/write access
+        cursor.execute("PRAGMA journal_mode=WAL")
         
         # Create metadata table
         cursor.execute("""
@@ -209,6 +227,48 @@ class SQLiteBackend(DatabaseBackend):
             )
         """)
         
+        # Create project scripts registry table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS project_scripts (
+                id INTEGER PRIMARY KEY,
+                script_name TEXT NOT NULL,
+                script_type TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                description TEXT,
+                version TEXT DEFAULT '1.0.0',
+                is_enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT
+            )
+        """)
+        
+        # Create script execution log table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS script_execution_log (
+                id INTEGER PRIMARY KEY,
+                script_id INTEGER NOT NULL REFERENCES project_scripts(id),
+                status TEXT NOT NULL,
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP,
+                exit_code INTEGER,
+                stdout TEXT,
+                stderr TEXT,
+                metadata TEXT
+            )
+        """)
+        
+        # Create schema versions table for migration tracking
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS schema_versions (
+                id INTEGER PRIMARY KEY,
+                version TEXT NOT NULL UNIQUE,
+                script_name TEXT NOT NULL,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                checksum TEXT
+            )
+        """)
+        
         conn.commit()
         self._connections[project_name] = conn
         
@@ -254,18 +314,35 @@ class SQLiteBackend(DatabaseBackend):
         return sorted(projects)
     
     def delete_project(self, project_name: str) -> bool:
-        """Delete a project by removing its database file."""
+        """Delete a project by removing its database file and scripts folder."""
         db_path = self._get_db_path(project_name)
+        project_dir = db_path.parent
         
         if project_name in self._connections:
             self._connections[project_name].close()
             del self._connections[project_name]
         
         if db_path.exists():
+            # Remove WAL and SHM files if they exist
+            wal_path = db_path.with_suffix('.db-wal')
+            shm_path = db_path.with_suffix('.db-shm')
+            if wal_path.exists():
+                wal_path.unlink()
+            if shm_path.exists():
+                shm_path.unlink()
+            
+            # Remove the database file
             db_path.unlink()
-            # Remove empty directory
-            if db_path.parent.exists() and not any(db_path.parent.iterdir()):
-                db_path.parent.rmdir()
+            
+            # Remove scripts folder and all its contents
+            scripts_dir = project_dir / "scripts"
+            if scripts_dir.exists():
+                import shutil
+                shutil.rmtree(scripts_dir)
+            
+            # Remove project directory if empty
+            if project_dir.exists() and not any(project_dir.iterdir()):
+                project_dir.rmdir()
             return True
         return False
     
@@ -1277,3 +1354,577 @@ class SQLiteBackend(DatabaseBackend):
             }
             for row in selected
         ]
+
+    # ==================== Script Operations ====================
+    
+    def _create_script_templates(self, scripts_base: Path):
+        """Create template files in script directories for new projects."""
+        templates = {
+            'scrapers/_template.py': '''"""
+Scraper Template
+================
+A template for creating web scraper scripts.
+
+Usage:
+    Customize the URL and parsing logic below.
+    Run this script to scrape data and save to the project database.
+"""
+import requests
+from bs4 import BeautifulSoup
+
+
+def scrape(url: str) -> dict:
+    """
+    Scrape content from the given URL.
+    
+    Args:
+        url: The URL to scrape
+        
+    Returns:
+        A dictionary containing the scraped data
+    """
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # Customize your scraping logic here
+    title = soup.find('title')
+    title_text = title.get_text(strip=True) if title else ""
+    
+    paragraphs = soup.find_all('p')
+    content = "\\n".join(p.get_text(strip=True) for p in paragraphs)
+    
+    return {
+        'url': url,
+        'title': title_text,
+        'content': content
+    }
+
+
+if __name__ == "__main__":
+    # Example usage
+    result = scrape("https://example.com")
+    print(f"Title: {result['title']}")
+    print(f"Content length: {len(result['content'])} chars")
+''',
+            'data-manipulation/_template.py': '''"""
+Data Manipulation Template
+==========================
+A template for creating data manipulation scripts.
+
+Usage:
+    Customize the data transformations below.
+    This script can read from and write to the project database.
+"""
+import sqlite3
+from pathlib import Path
+
+
+def get_db_connection(project_name: str) -> sqlite3.Connection:
+    """Get connection to the project database."""
+    db_path = Path(f"projects/{project_name}/project_database.db")
+    return sqlite3.connect(db_path)
+
+
+def transform_data(project_name: str):
+    """
+    Perform data transformations on the project database.
+    
+    Customize this function to:
+    - Clean and normalize data
+    - Merge or split records
+    - Calculate derived fields
+    - Apply business logic
+    """
+    conn = get_db_connection(project_name)
+    cursor = conn.cursor()
+    
+    try:
+        # Example: Get all QA pairs
+        cursor.execute("SELECT id, prompt_text, response_text FROM qa_text")
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            id_, prompt, response = row
+            # Add your transformation logic here
+            # Example: Update a field
+            # cursor.execute("UPDATE qa_text SET weight = ? WHERE id = ?", (1.5, id_))
+            pass
+        
+        conn.commit()
+        print(f"Processed {len(rows)} records")
+        
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    import sys
+    project = sys.argv[1] if len(sys.argv) > 1 else "testproject"
+    transform_data(project)
+''',
+            'ai-scripts/_template.py': '''"""
+AI Script Template
+==================
+A template for creating AI-powered scripts.
+
+Usage:
+    Set your API key as an environment variable.
+    Customize the prompt and model settings below.
+"""
+import os
+import json
+from typing import Optional
+
+# Uncomment the API client you want to use:
+# import openai
+# from openai import OpenAI
+
+
+def call_llm(
+    prompt: str,
+    system_prompt: str = "You are a helpful assistant.",
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.7,
+    max_tokens: int = 1000
+) -> Optional[str]:
+    """
+    Call an LLM API with the given prompt.
+    
+    Supports OpenAI and OpenRouter APIs.
+    Set OPENAI_API_KEY or OPENROUTER_API_KEY environment variable.
+    """
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("No API key found. Set OPENAI_API_KEY or OPENROUTER_API_KEY")
+    
+    # Determine base URL based on which key is set
+    if os.getenv("OPENROUTER_API_KEY"):
+        base_url = "https://openrouter.ai/api/v1"
+    else:
+        base_url = "https://api.openai.com/v1"
+    
+    # Uncomment to use the OpenAI client:
+    # client = OpenAI(api_key=api_key, base_url=base_url)
+    # 
+    # response = client.chat.completions.create(
+    #     model=model,
+    #     messages=[
+    #         {"role": "system", "content": system_prompt},
+    #         {"role": "user", "content": prompt}
+    #     ],
+    #     temperature=temperature,
+    #     max_tokens=max_tokens
+    # )
+    # 
+    # return response.choices[0].message.content
+    
+    print(f"Would call {model} with prompt: {prompt[:100]}...")
+    return "AI response placeholder"
+
+
+def process_batch(prompts: list[str]) -> list[str]:
+    """Process a batch of prompts through the LLM."""
+    results = []
+    for prompt in prompts:
+        result = call_llm(prompt)
+        if result:
+            results.append(result)
+    return results
+
+
+if __name__ == "__main__":
+    # Example usage
+    response = call_llm("What is the capital of France?")
+    print(f"Response: {response}")
+''',
+            'migrations/_template.sql': '''-- Migration Template
+-- ==================
+-- A template for SQL migrations.
+--
+-- Naming convention: YYYYMMDD_HHMMSS_description.sql
+-- Example: 20250101_120000_add_tags_table.sql
+--
+-- Migrations are applied in order and tracked in schema_versions table.
+
+-- Up Migration
+-- Add your schema changes here
+
+-- Example: Create a new table
+-- CREATE TABLE IF NOT EXISTS tags (
+--     id INTEGER PRIMARY KEY,
+--     name TEXT NOT NULL UNIQUE,
+--     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+-- );
+
+-- Example: Add a column
+-- ALTER TABLE qa_text ADD COLUMN tags TEXT;
+
+-- Example: Create an index
+-- CREATE INDEX IF NOT EXISTS idx_qa_text_weight ON qa_text(weight);
+
+-- Down Migration (for rollback - keep commented)
+-- DROP TABLE IF EXISTS tags;
+-- ALTER TABLE qa_text DROP COLUMN tags;
+'''
+        }
+        
+        for rel_path, content in templates.items():
+            template_path = scripts_base / rel_path
+            if not template_path.exists():
+                template_path.write_text(content, encoding='utf-8')
+    
+    def _ensure_script_tables(self, conn: sqlite3.Connection):
+        """Ensure script-related tables exist (for older projects)."""
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS project_scripts (
+                id INTEGER PRIMARY KEY,
+                script_name TEXT NOT NULL,
+                script_type TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                description TEXT,
+                version TEXT DEFAULT '1.0.0',
+                is_enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS script_execution_log (
+                id INTEGER PRIMARY KEY,
+                script_id INTEGER NOT NULL REFERENCES project_scripts(id),
+                status TEXT NOT NULL,
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP,
+                exit_code INTEGER,
+                stdout TEXT,
+                stderr TEXT,
+                metadata TEXT
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS schema_versions (
+                id INTEGER PRIMARY KEY,
+                version TEXT NOT NULL UNIQUE,
+                script_name TEXT NOT NULL,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                checksum TEXT
+            )
+        """)
+        
+        conn.commit()
+    
+    def register_script(
+        self,
+        project_name: str,
+        script_name: str,
+        script_type: str,
+        file_path: str,
+        description: str = "",
+        version: str = "1.0.0",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        metadata_json = json.dumps(metadata) if metadata else None
+        
+        cursor.execute("""
+            INSERT INTO project_scripts 
+            (script_name, script_type, file_path, description, version, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (script_name, script_type, file_path, description, version, metadata_json))
+        
+        conn.commit()
+        return cursor.lastrowid
+    
+    def get_script(self, project_name: str, script_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM project_scripts WHERE id = ?", (script_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        return {
+            "id": row["id"],
+            "script_name": row["script_name"],
+            "script_type": row["script_type"],
+            "file_path": row["file_path"],
+            "description": row["description"],
+            "version": row["version"],
+            "is_enabled": bool(row["is_enabled"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "metadata": json.loads(row["metadata"]) if row["metadata"] else None
+        }
+    
+    def list_scripts(
+        self,
+        project_name: str,
+        script_type: Optional[str] = None,
+        enabled_only: bool = True
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        query = "SELECT * FROM project_scripts WHERE 1=1"
+        params = []
+        
+        if script_type:
+            query += " AND script_type = ?"
+            params.append(script_type)
+        
+        if enabled_only:
+            query += " AND is_enabled = 1"
+        
+        query += " ORDER BY script_type, script_name"
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        return [
+            {
+                "id": row["id"],
+                "script_name": row["script_name"],
+                "script_type": row["script_type"],
+                "file_path": row["file_path"],
+                "description": row["description"],
+                "version": row["version"],
+                "is_enabled": bool(row["is_enabled"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "metadata": json.loads(row["metadata"]) if row["metadata"] else None
+            }
+            for row in rows
+        ]
+    
+    def update_script(
+        self,
+        project_name: str,
+        script_id: int,
+        updates: Dict[str, Any]
+    ) -> bool:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        allowed_fields = {
+            "script_name", "script_type", "file_path", "description", 
+            "version", "is_enabled", "metadata"
+        }
+        
+        set_clauses = []
+        params = []
+        
+        for key, value in updates.items():
+            if key not in allowed_fields:
+                continue
+            if key == "metadata":
+                value = json.dumps(value) if value else None
+            if key == "is_enabled":
+                value = 1 if value else 0
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+        
+        if not set_clauses:
+            return False
+        
+        set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(script_id)
+        
+        cursor.execute(
+            f"UPDATE project_scripts SET {', '.join(set_clauses)} WHERE id = ?",
+            params
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def delete_script(self, project_name: str, script_id: int) -> bool:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        # Delete execution logs first
+        cursor.execute("DELETE FROM script_execution_log WHERE script_id = ?", (script_id,))
+        cursor.execute("DELETE FROM project_scripts WHERE id = ?", (script_id,))
+        
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def log_script_execution(
+        self,
+        project_name: str,
+        script_id: int,
+        status: str,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        metadata_json = json.dumps(metadata) if metadata else None
+        finished_at = None if status == "running" else "CURRENT_TIMESTAMP"
+        
+        if status == "running":
+            cursor.execute("""
+                INSERT INTO script_execution_log 
+                (script_id, status, exit_code, stdout, stderr, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (script_id, status, exit_code, stdout, stderr, metadata_json))
+        else:
+            cursor.execute("""
+                INSERT INTO script_execution_log 
+                (script_id, status, finished_at, exit_code, stdout, stderr, metadata)
+                VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+            """, (script_id, status, exit_code, stdout, stderr, metadata_json))
+        
+        conn.commit()
+        return cursor.lastrowid
+    
+    def update_script_execution(
+        self,
+        project_name: str,
+        execution_id: int,
+        status: str,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None
+    ) -> bool:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE script_execution_log 
+            SET status = ?, finished_at = CURRENT_TIMESTAMP, 
+                exit_code = ?, stdout = ?, stderr = ?
+            WHERE id = ?
+        """, (status, exit_code, stdout, stderr, execution_id))
+        
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def get_script_executions(
+        self,
+        project_name: str,
+        script_id: Optional[int] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        if script_id:
+            cursor.execute("""
+                SELECT e.*, s.script_name, s.script_type 
+                FROM script_execution_log e
+                JOIN project_scripts s ON e.script_id = s.id
+                WHERE e.script_id = ?
+                ORDER BY e.started_at DESC
+                LIMIT ?
+            """, (script_id, limit))
+        else:
+            cursor.execute("""
+                SELECT e.*, s.script_name, s.script_type 
+                FROM script_execution_log e
+                JOIN project_scripts s ON e.script_id = s.id
+                ORDER BY e.started_at DESC
+                LIMIT ?
+            """, (limit,))
+        
+        rows = cursor.fetchall()
+        
+        return [
+            {
+                "id": row["id"],
+                "script_id": row["script_id"],
+                "script_name": row["script_name"],
+                "script_type": row["script_type"],
+                "status": row["status"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "exit_code": row["exit_code"],
+                "stdout": row["stdout"],
+                "stderr": row["stderr"],
+                "metadata": json.loads(row["metadata"]) if row["metadata"] else None
+            }
+            for row in rows
+        ]
+    
+    # ==================== Migration Operations ====================
+    
+    def get_applied_migrations(self, project_name: str) -> List[Dict[str, Any]]:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM schema_versions ORDER BY applied_at ASC
+        """)
+        rows = cursor.fetchall()
+        
+        return [
+            {
+                "id": row["id"],
+                "version": row["version"],
+                "script_name": row["script_name"],
+                "applied_at": row["applied_at"],
+                "checksum": row["checksum"]
+            }
+            for row in rows
+        ]
+    
+    def record_migration(
+        self,
+        project_name: str,
+        version: str,
+        script_name: str,
+        checksum: Optional[str] = None
+    ) -> int:
+        conn = self._get_connection(project_name)
+        self._ensure_script_tables(conn)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO schema_versions (version, script_name, checksum)
+            VALUES (?, ?, ?)
+        """, (version, script_name, checksum))
+        
+        conn.commit()
+        return cursor.lastrowid
+    
+    def get_scripts_directory(self, project_name: str) -> Optional[str]:
+        """Get the absolute path to the project's scripts directory."""
+        db_path = self._get_db_path(project_name)
+        if not db_path.exists():
+            return None
+        
+        scripts_dir = db_path.parent / "scripts"
+        
+        # Create if it doesn't exist (for older projects)
+        if not scripts_dir.exists():
+            scripts_dir.mkdir(exist_ok=True)
+            for subdir in ['scrapers', 'data-manipulation', 'ai-scripts', 'migrations']:
+                (scripts_dir / subdir).mkdir(exist_ok=True)
+            # Create template files for older projects
+            self._create_script_templates(scripts_dir)
+        
+        return str(scripts_dir)

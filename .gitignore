@@ -22,6 +22,11 @@ config.toml
 # Generated database files
 # Ignore all .db files within the projects directory and its subdirectories
 projects/**/*.db
+projects/**/*.db-wal
+projects/**/*.db-shm
+
+# State file for GUI communication
+state.json
 
 # OS-specific
 .DS_Store

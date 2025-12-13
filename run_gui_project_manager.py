@@ -25,6 +25,8 @@ from src.config import (
     load_config,
     save_config,
     CONFIG_PATH,
+    set_current_project,
+    set_script_running,
 )
 from src.database import get_database
 
@@ -62,9 +64,11 @@ class ProjectManagerApp(tk.Tk):
         # Notebook for tabs
         self.notebook = ttk.Notebook(main_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         
         # Create tabs
         self._build_projects_tab()
+        self._build_scripts_tab()
         self._build_env_settings_tab()
         self._build_inference_config_tab()
         self._build_database_config_tab()
@@ -158,8 +162,20 @@ class ProjectManagerApp(tk.Tk):
                 self.projects_listbox.insert(tk.END, project)
             
             self.status_var.set(f"Found {len(projects)} project(s) [{DATABASE_TYPE}]")
+            
+            # Also refresh scripts tab project combo
+            self._refresh_scripts_projects()
         except Exception as e:
             self.status_var.set(f"Error loading projects: {e}")
+    
+    def _on_tab_changed(self, event):
+        """Handle notebook tab changes."""
+        tab_id = self.notebook.select()
+        tab_text = self.notebook.tab(tab_id, "text")
+        
+        # Refresh scripts projects when Scripts tab is selected
+        if "Scripts" in tab_text:
+            self._refresh_scripts_projects()
     
     def _on_project_select(self, event):
         """Handle project selection."""
@@ -169,6 +185,12 @@ class ProjectManagerApp(tk.Tk):
         
         project_name = self.projects_listbox.get(selection[0])
         self._show_project_details(project_name)
+        
+        # Update state file for Streamlit to know which project is selected
+        try:
+            set_current_project(project_name)
+        except Exception:
+            pass  # Don't break on state file errors
     
     def _show_project_details(self, project_name: str):
         """Display details about a project."""
@@ -311,6 +333,336 @@ class ProjectManagerApp(tk.Tk):
         
         project_name = self.projects_listbox.get(selection[0])
         self._open_streamlit(project_name)
+    
+    # =========================================================================
+    # SCRIPTS TAB
+    # =========================================================================
+    
+    def _build_scripts_tab(self):
+        """Build the Scripts management tab."""
+        tab = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab, text="📜 Scripts")
+        
+        # Top frame - project and script type selection
+        top_frame = ttk.Frame(tab)
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(top_frame, text="Project:").pack(side=tk.LEFT)
+        self.scripts_project_var = tk.StringVar()
+        self.scripts_project_combo = ttk.Combobox(
+            top_frame, 
+            textvariable=self.scripts_project_var,
+            state="readonly",
+            width=25
+        )
+        self.scripts_project_combo.pack(side=tk.LEFT, padx=(5, 20))
+        self.scripts_project_combo.bind("<<ComboboxSelected>>", self._on_scripts_project_change)
+        
+        ttk.Label(top_frame, text="Type:").pack(side=tk.LEFT)
+        self.script_type_var = tk.StringVar(value="all")
+        script_types = ["all", "scraper", "data-manipulation", "ai-script", "migration"]
+        self.script_type_combo = ttk.Combobox(
+            top_frame,
+            textvariable=self.script_type_var,
+            values=script_types,
+            state="readonly",
+            width=18
+        )
+        self.script_type_combo.pack(side=tk.LEFT, padx=5)
+        self.script_type_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_scripts_list())
+        
+        # Main content - split pane
+        paned = ttk.PanedWindow(tab, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+        
+        # Left panel - script list
+        left_frame = ttk.LabelFrame(paned, text="Registered Scripts", padding=10)
+        paned.add(left_frame, weight=1)
+        
+        # Scripts listbox
+        list_container = ttk.Frame(left_frame)
+        list_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.scripts_listbox = tk.Listbox(list_container, height=15, width=35)
+        scripts_scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.scripts_listbox.yview)
+        self.scripts_listbox.configure(yscrollcommand=scripts_scrollbar.set)
+        
+        self.scripts_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scripts_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.scripts_listbox.bind("<<ListboxSelect>>", self._on_script_select)
+        
+        # Script list buttons
+        list_btn_frame = ttk.Frame(left_frame)
+        list_btn_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(list_btn_frame, text="New Script", command=self._show_new_script_dialog).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(list_btn_frame, text="Refresh", command=self._refresh_scripts_list).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(list_btn_frame, text="Delete", command=self._delete_selected_script).pack(side=tk.LEFT)
+        
+        # Right panel - script editor
+        right_frame = ttk.LabelFrame(paned, text="Script Editor", padding=10)
+        paned.add(right_frame, weight=2)
+        
+        # Script info
+        info_frame = ttk.Frame(right_frame)
+        info_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Label(info_frame, text="Name:").grid(row=0, column=0, sticky=tk.W)
+        self.script_name_var = tk.StringVar()
+        self.script_name_entry = ttk.Entry(info_frame, textvariable=self.script_name_var, width=30)
+        self.script_name_entry.grid(row=0, column=1, sticky=tk.W, padx=5)
+        
+        ttk.Label(info_frame, text="Type:").grid(row=0, column=2, sticky=tk.W, padx=(10, 0))
+        self.edit_script_type_var = tk.StringVar()
+        self.edit_script_type_combo = ttk.Combobox(
+            info_frame,
+            textvariable=self.edit_script_type_var,
+            values=["scraper", "data-manipulation", "ai-script", "migration"],
+            state="readonly",
+            width=15
+        )
+        self.edit_script_type_combo.grid(row=0, column=3, sticky=tk.W, padx=5)
+        
+        ttk.Label(info_frame, text="Description:").grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        self.script_desc_var = tk.StringVar()
+        self.script_desc_entry = ttk.Entry(info_frame, textvariable=self.script_desc_var, width=60)
+        self.script_desc_entry.grid(row=1, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=(5, 0))
+        
+        # Code editor
+        editor_label = ttk.Label(right_frame, text="Code:")
+        editor_label.pack(anchor=tk.W, pady=(10, 2))
+        
+        editor_container = ttk.Frame(right_frame)
+        editor_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.script_editor = tk.Text(
+            editor_container, 
+            wrap=tk.NONE, 
+            font=("Consolas", 10),
+            undo=True
+        )
+        editor_vscroll = ttk.Scrollbar(editor_container, orient=tk.VERTICAL, command=self.script_editor.yview)
+        editor_hscroll = ttk.Scrollbar(editor_container, orient=tk.HORIZONTAL, command=self.script_editor.xview)
+        self.script_editor.configure(yscrollcommand=editor_vscroll.set, xscrollcommand=editor_hscroll.set)
+        
+        self.script_editor.grid(row=0, column=0, sticky="nsew")
+        editor_vscroll.grid(row=0, column=1, sticky="ns")
+        editor_hscroll.grid(row=1, column=0, sticky="ew")
+        
+        editor_container.grid_rowconfigure(0, weight=1)
+        editor_container.grid_columnconfigure(0, weight=1)
+        
+        # Editor buttons
+        editor_btn_frame = ttk.Frame(right_frame)
+        editor_btn_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(editor_btn_frame, text="Save Script", command=self._save_current_script).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(editor_btn_frame, text="Run Script", command=self._run_current_script).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(editor_btn_frame, text="Open in Editor", command=self._open_script_external).pack(side=tk.LEFT)
+        
+        # Store current script info
+        self._current_script_id = None
+        self._current_script_path = None
+    
+    def _on_scripts_project_change(self, event=None):
+        """Handle project selection change in scripts tab."""
+        project_name = self.scripts_project_var.get()
+        if project_name:
+            try:
+                set_current_project(project_name)
+            except Exception:
+                pass
+        self._refresh_scripts_list()
+    
+    def _refresh_scripts_list(self):
+        """Refresh the list of scripts for the selected project."""
+        self.scripts_listbox.delete(0, tk.END)
+        
+        project_name = self.scripts_project_var.get()
+        if not project_name:
+            return
+        
+        try:
+            db = get_database()
+            script_type = self.script_type_var.get()
+            script_type = None if script_type == "all" else script_type
+            
+            scripts = db.list_scripts(project_name, script_type=script_type, enabled_only=False)
+            
+            self._scripts_cache = {s["id"]: s for s in scripts}
+            
+            for script in scripts:
+                prefix = "✓ " if script["is_enabled"] else "✗ "
+                type_abbrev = {"scraper": "SCR", "data-manipulation": "DM", "ai-script": "AI", "migration": "MIG"}.get(script["script_type"], "???")
+                self.scripts_listbox.insert(tk.END, f"{prefix}[{type_abbrev}] {script['script_name']}")
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load scripts: {e}")
+    
+    def _on_script_select(self, event=None):
+        """Handle script selection."""
+        selection = self.scripts_listbox.curselection()
+        if not selection:
+            return
+        
+        project_name = self.scripts_project_var.get()
+        if not project_name:
+            return
+        
+        # Get script ID from cache
+        idx = selection[0]
+        script_ids = list(self._scripts_cache.keys())
+        if idx >= len(script_ids):
+            return
+        
+        script_id = script_ids[idx]
+        script = self._scripts_cache.get(script_id)
+        
+        if not script:
+            return
+        
+        self._current_script_id = script_id
+        self.script_name_var.set(script["script_name"])
+        self.edit_script_type_var.set(script["script_type"])
+        self.script_desc_var.set(script.get("description") or "")
+        
+        # Load script content
+        try:
+            db = get_database()
+            scripts_dir = db.get_scripts_directory(project_name)
+            if scripts_dir:
+                script_path = Path(scripts_dir) / script["file_path"]
+                self._current_script_path = script_path
+                
+                if script_path.exists():
+                    content = script_path.read_text(encoding="utf-8")
+                    self.script_editor.delete("1.0", tk.END)
+                    self.script_editor.insert("1.0", content)
+                else:
+                    self.script_editor.delete("1.0", tk.END)
+                    self.script_editor.insert("1.0", f"# Script file not found: {script_path}")
+        except Exception as e:
+            self.script_editor.delete("1.0", tk.END)
+            self.script_editor.insert("1.0", f"# Error loading script: {e}")
+    
+    def _show_new_script_dialog(self):
+        """Show dialog to create a new script."""
+        project_name = self.scripts_project_var.get()
+        if not project_name:
+            messagebox.showwarning("No Project", "Please select a project first.")
+            return
+        
+        dialog = NewScriptDialog(self, project_name)
+        self.wait_window(dialog)
+        
+        if dialog.result:
+            self._refresh_scripts_list()
+            self.status_var.set(f"Script '{dialog.result['name']}' created.")
+    
+    def _delete_selected_script(self):
+        """Delete the selected script."""
+        if not self._current_script_id:
+            messagebox.showwarning("No Selection", "Please select a script first.")
+            return
+        
+        project_name = self.scripts_project_var.get()
+        script = self._scripts_cache.get(self._current_script_id)
+        
+        if not messagebox.askyesno("Confirm Delete", 
+                                    f"Delete script '{script['script_name']}'?\n\n"
+                                    "This will remove the script registration.\n"
+                                    "The script file will NOT be deleted."):
+            return
+        
+        try:
+            db = get_database()
+            db.delete_script(project_name, self._current_script_id)
+            self._current_script_id = None
+            self._current_script_path = None
+            self.script_editor.delete("1.0", tk.END)
+            self._refresh_scripts_list()
+            self.status_var.set("Script deleted.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete script: {e}")
+    
+    def _save_current_script(self):
+        """Save the current script content and metadata."""
+        if not self._current_script_path:
+            messagebox.showwarning("No Script", "No script is currently loaded.")
+            return
+        
+        project_name = self.scripts_project_var.get()
+        
+        try:
+            # Save file content
+            content = self.script_editor.get("1.0", tk.END)
+            self._current_script_path.write_text(content, encoding="utf-8")
+            
+            # Update metadata
+            if self._current_script_id:
+                db = get_database()
+                db.update_script(project_name, self._current_script_id, {
+                    "script_name": self.script_name_var.get(),
+                    "script_type": self.edit_script_type_var.get(),
+                    "description": self.script_desc_var.get()
+                })
+            
+            self.status_var.set(f"Script saved: {self._current_script_path.name}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save script: {e}")
+    
+    def _run_current_script(self):
+        """Run the current script in a subprocess."""
+        if not self._current_script_path or not self._current_script_path.exists():
+            messagebox.showwarning("No Script", "Please select a valid script first.")
+            return
+        
+        project_name = self.scripts_project_var.get()
+        
+        # Save before running
+        self._save_current_script()
+        
+        # Create execution dialog
+        dialog = ScriptExecutionDialog(
+            self, 
+            project_name, 
+            self._current_script_id,
+            self._current_script_path
+        )
+        self.wait_window(dialog)
+    
+    def _open_script_external(self):
+        """Open the script in the system's default editor."""
+        if not self._current_script_path or not self._current_script_path.exists():
+            messagebox.showwarning("No Script", "No script file to open.")
+            return
+        
+        try:
+            import os
+            os.startfile(str(self._current_script_path))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open script: {e}")
+    
+    def _refresh_scripts_projects(self):
+        """Refresh the projects combo in scripts tab."""
+        try:
+            db = get_database()
+            projects = db.list_projects()
+            self.scripts_project_combo["values"] = projects
+            
+            current = self.scripts_project_var.get()
+            # Reset selection if current project doesn't exist anymore
+            if current and current not in projects:
+                self.scripts_project_var.set("")
+                current = ""
+            
+            # Select first project if none selected
+            if projects and not current:
+                self.scripts_project_var.set(projects[0])
+                self._refresh_scripts_list()
+        except Exception as e:
+            self.status_var.set(f"Error loading projects: {e}")
     
     # =========================================================================
     # ENVIRONMENT SETTINGS TAB
@@ -1190,6 +1542,519 @@ class TextInputDialog(tk.Toplevel):
         self.result = self.entry.get().strip()
         if self.result:
             self.destroy()
+
+
+class NewScriptDialog(tk.Toplevel):
+    """Dialog for creating a new script."""
+    
+    def __init__(self, master, project_name: str):
+        super().__init__(master)
+        self.title("New Script")
+        self.geometry("450x320")
+        self.resizable(False, False)
+        self.transient(master)
+        
+        self.project_name = project_name
+        self.result = None
+        
+        main_frame = ttk.Frame(self, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Script name
+        ttk.Label(main_frame, text="Script Name:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.name_var = tk.StringVar()
+        ttk.Entry(main_frame, textvariable=self.name_var, width=40).grid(row=0, column=1, pady=5, padx=(10, 0))
+        
+        # Script type
+        ttk.Label(main_frame, text="Script Type:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.type_var = tk.StringVar(value="scraper")
+        type_combo = ttk.Combobox(
+            main_frame,
+            textvariable=self.type_var,
+            values=["scraper", "data-manipulation", "ai-script", "migration"],
+            state="readonly",
+            width=37
+        )
+        type_combo.grid(row=1, column=1, pady=5, padx=(10, 0))
+        
+        # File name
+        ttk.Label(main_frame, text="File Name:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.filename_var = tk.StringVar()
+        ttk.Entry(main_frame, textvariable=self.filename_var, width=40).grid(row=2, column=1, pady=5, padx=(10, 0))
+        ttk.Label(main_frame, text="(e.g., my_scraper.py)", font=("Segoe UI", 8, "italic")).grid(
+            row=3, column=1, sticky=tk.W, padx=(10, 0)
+        )
+        
+        # Description
+        ttk.Label(main_frame, text="Description:").grid(row=4, column=0, sticky=tk.NW, pady=5)
+        self.desc_text = tk.Text(main_frame, height=4, width=38)
+        self.desc_text.grid(row=4, column=1, pady=5, padx=(10, 0))
+        
+        # Template checkbox
+        self.use_template_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            main_frame, 
+            text="Create with template",
+            variable=self.use_template_var
+        ).grid(row=5, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.grid(row=6, column=0, columnspan=2, pady=(15, 0))
+        
+        ttk.Button(btn_frame, text="Create", command=self._on_create).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.LEFT, padx=5)
+        
+        self.grab_set()
+    
+    def _on_create(self):
+        name = self.name_var.get().strip()
+        filename = self.filename_var.get().strip()
+        script_type = self.type_var.get()
+        description = self.desc_text.get("1.0", tk.END).strip()
+        
+        if not name:
+            messagebox.showwarning("Missing Name", "Please enter a script name.")
+            return
+        
+        if not filename:
+            # Auto-generate filename from name
+            filename = name.lower().replace(" ", "_").replace("-", "_") + ".py"
+        
+        if not filename.endswith(".py") and script_type != "migration":
+            filename += ".py"
+        elif script_type == "migration" and not filename.endswith(".sql"):
+            filename += ".sql"
+        
+        try:
+            db = get_database()
+            scripts_dir = db.get_scripts_directory(self.project_name)
+            
+            if not scripts_dir:
+                messagebox.showerror("Error", f"Could not get scripts directory for project '{self.project_name}'.\n\n"
+                                              "Please ensure the project exists and try again.")
+                return
+            
+            # Determine subdirectory based on type
+            type_dir = {
+                "scraper": "scrapers",
+                "data-manipulation": "data-manipulation",
+                "ai-script": "ai-scripts",
+                "migration": "migrations"
+            }.get(script_type, "scrapers")
+            
+            file_path = Path(scripts_dir) / type_dir / filename
+            relative_path = f"{type_dir}/{filename}"
+            
+            # Create file with template
+            if self.use_template_var.get():
+                template = self._get_template(script_type, name)
+            else:
+                template = ""
+            
+            file_path.write_text(template, encoding="utf-8")
+            
+            # Register in database
+            script_id = db.register_script(
+                self.project_name,
+                name,
+                script_type,
+                relative_path,
+                description
+            )
+            
+            self.result = {"id": script_id, "name": name, "path": str(file_path)}
+            self.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create script: {e}")
+    
+    def _get_template(self, script_type: str, name: str) -> str:
+        """Get a template for the script type."""
+        if script_type == "scraper":
+            return f'''#!/usr/bin/env python3
+"""
+Scraper: {name}
+Description: [Add description here]
+"""
+
+import requests
+from bs4 import BeautifulSoup
+
+
+def scrape(url: str) -> dict:
+    """
+    Scrape data from the given URL.
+    
+    Args:
+        url: The URL to scrape
+        
+    Returns:
+        Dictionary with scraped data
+    """
+    response = requests.get(url)
+    response.raise_for_status()
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # TODO: Implement scraping logic
+    data = {{
+        "url": url,
+        "title": soup.title.string if soup.title else "",
+        "content": ""
+    }}
+    
+    return data
+
+
+if __name__ == "__main__":
+    # Test the scraper
+    result = scrape("https://example.com")
+    print(result)
+'''
+        
+        elif script_type == "data-manipulation":
+            return f'''#!/usr/bin/env python3
+"""
+Data Manipulation: {name}
+Description: [Add description here]
+"""
+
+import json
+import sys
+sys.path.insert(0, ".")
+
+from src.database import get_database
+
+
+def main():
+    """Main entry point for data manipulation."""
+    db = get_database()
+    
+    # TODO: Get your project name
+    project_name = "your-project"
+    
+    # TODO: Implement data manipulation logic
+    # Example: Get QA pairs
+    # qa_pairs = db.get_qa_pairs(project_name)
+    
+    print("Data manipulation complete.")
+
+
+if __name__ == "__main__":
+    main()
+'''
+        
+        elif script_type == "ai-script":
+            return f'''#!/usr/bin/env python3
+"""
+AI Script: {name}
+Description: [Add description here]
+"""
+
+import os
+import sys
+sys.path.insert(0, ".")
+
+from openai import OpenAI
+
+
+def main():
+    """Main entry point for AI script."""
+    # Initialize client (uses OPENAI_API_KEY or OPENROUTER_API_KEY)
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    
+    # TODO: Implement AI logic
+    response = client.chat.completions.create(
+        model="openai/gpt-4.1-nano",
+        messages=[
+            {{"role": "system", "content": "You are a helpful assistant."}},
+            {{"role": "user", "content": "Hello!"}}
+        ]
+    )
+    
+    print(response.choices[0].message.content)
+
+
+if __name__ == "__main__":
+    main()
+'''
+        
+        elif script_type == "migration":
+            return f'''-- Migration: {name}
+-- Description: [Add description here]
+-- Version: 001
+
+-- Add your SQL migration statements here
+
+-- Example: Add a new column
+-- ALTER TABLE qa_text ADD COLUMN category TEXT;
+
+-- Example: Create a new table
+-- CREATE TABLE IF NOT EXISTS custom_data (
+--     id INTEGER PRIMARY KEY,
+--     name TEXT NOT NULL,
+--     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+-- );
+'''
+        
+        return f"# {name}\n# Script type: {script_type}\n"
+
+
+class ScriptExecutionDialog(tk.Toplevel):
+    """Dialog for running a script and viewing output."""
+    
+    def __init__(self, master, project_name: str, script_id: int, script_path: Path):
+        super().__init__(master)
+        self.title("Script Execution")
+        self.geometry("700x500")
+        self.transient(master)
+        
+        self.project_name = project_name
+        self.script_id = script_id
+        self.script_path = script_path
+        self.process = None
+        self.execution_id = None
+        
+        main_frame = ttk.Frame(self, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Info bar
+        info_frame = ttk.Frame(main_frame)
+        info_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(info_frame, text=f"Script: {script_path.name}", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(info_frame, textvariable=self.status_var).pack(side=tk.RIGHT)
+        
+        # Output area
+        output_label = ttk.Label(main_frame, text="Output:")
+        output_label.pack(anchor=tk.W)
+        
+        output_container = ttk.Frame(main_frame)
+        output_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.output_text = tk.Text(
+            output_container,
+            wrap=tk.WORD,
+            font=("Consolas", 9),
+            state=tk.DISABLED,
+            bg="#1e1e1e",
+            fg="#d4d4d4"
+        )
+        output_scroll = ttk.Scrollbar(output_container, orient=tk.VERTICAL, command=self.output_text.yview)
+        self.output_text.configure(yscrollcommand=output_scroll.set)
+        
+        self.output_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        output_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure tags for colored output
+        self.output_text.tag_configure("stdout", foreground="#d4d4d4")
+        self.output_text.tag_configure("stderr", foreground="#f14c4c")
+        self.output_text.tag_configure("info", foreground="#3794ff")
+        
+        # Button bar
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        self.run_btn = ttk.Button(btn_frame, text="▶ Run", command=self._run_script)
+        self.run_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.stop_btn = ttk.Button(btn_frame, text="⬛ Stop", command=self._stop_script, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        ttk.Button(btn_frame, text="Clear", command=self._clear_output).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.grab_set()
+    
+    def _append_output(self, text: str, tag: str = "stdout"):
+        """Append text to the output area."""
+        self.output_text.configure(state=tk.NORMAL)
+        self.output_text.insert(tk.END, text, tag)
+        self.output_text.see(tk.END)
+        self.output_text.configure(state=tk.DISABLED)
+    
+    def _clear_output(self):
+        """Clear the output area."""
+        self.output_text.configure(state=tk.NORMAL)
+        self.output_text.delete("1.0", tk.END)
+        self.output_text.configure(state=tk.DISABLED)
+    
+    def _run_script(self):
+        """Run the script in a subprocess."""
+        if self.process:
+            return
+        
+        self._clear_output()
+        self._append_output(f"Starting: {self.script_path}\n", "info")
+        self._append_output("-" * 50 + "\n", "info")
+        
+        self.run_btn.configure(state=tk.DISABLED)
+        self.stop_btn.configure(state=tk.NORMAL)
+        self.status_var.set("Running...")
+        
+        # Log execution start
+        try:
+            db = get_database()
+            self.execution_id = db.log_script_execution(
+                self.project_name,
+                self.script_id,
+                "running"
+            )
+        except Exception:
+            pass
+        
+        # Update state file to indicate script is running
+        try:
+            set_script_running(self.script_id, True)
+        except Exception:
+            pass
+        
+        # Determine how to run the script
+        if self.script_path.suffix == ".py":
+            cmd = [sys.executable, str(self.script_path)]
+        elif self.script_path.suffix == ".sql":
+            # For SQL files, we'd need to handle differently
+            self._append_output("SQL migration execution not yet implemented.\n", "stderr")
+            self._append_output("Please use the API or run manually.\n", "info")
+            self._execution_finished(1, "", "SQL execution not implemented")
+            return
+        else:
+            cmd = [str(self.script_path)]
+        
+        # Start the process
+        def run_process():
+            try:
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=Path(__file__).parent,
+                    bufsize=1
+                )
+                
+                stdout_data = []
+                stderr_data = []
+                
+                # Read stdout and stderr
+                import selectors
+                sel = selectors.DefaultSelector()
+                sel.register(self.process.stdout, selectors.EVENT_READ)
+                sel.register(self.process.stderr, selectors.EVENT_READ)
+                
+                while self.process.poll() is None:
+                    for key, _ in sel.select(timeout=0.1):
+                        line = key.fileobj.readline()
+                        if line:
+                            if key.fileobj == self.process.stdout:
+                                stdout_data.append(line)
+                                self.after(0, lambda l=line: self._append_output(l, "stdout"))
+                            else:
+                                stderr_data.append(line)
+                                self.after(0, lambda l=line: self._append_output(l, "stderr"))
+                
+                # Read remaining output
+                remaining_stdout, remaining_stderr = self.process.communicate()
+                if remaining_stdout:
+                    stdout_data.append(remaining_stdout)
+                    self.after(0, lambda: self._append_output(remaining_stdout, "stdout"))
+                if remaining_stderr:
+                    stderr_data.append(remaining_stderr)
+                    self.after(0, lambda: self._append_output(remaining_stderr, "stderr"))
+                
+                exit_code = self.process.returncode
+                self.after(0, lambda: self._execution_finished(
+                    exit_code, 
+                    "".join(stdout_data), 
+                    "".join(stderr_data)
+                ))
+                
+            except Exception as e:
+                self.after(0, lambda: self._append_output(f"\nError: {e}\n", "stderr"))
+                self.after(0, lambda: self._execution_finished(1, "", str(e)))
+        
+        threading.Thread(target=run_process, daemon=True).start()
+    
+    def _execution_finished(self, exit_code: int, stdout: str, stderr: str):
+        """Handle script execution completion."""
+        self.process = None
+        self.run_btn.configure(state=tk.NORMAL)
+        self.stop_btn.configure(state=tk.DISABLED)
+        
+        self._append_output("-" * 50 + "\n", "info")
+        
+        if exit_code == 0:
+            self.status_var.set("Completed successfully")
+            self._append_output("✓ Script completed successfully\n", "info")
+            status = "success"
+        else:
+            self.status_var.set(f"Failed (exit code {exit_code})")
+            self._append_output(f"✗ Script failed with exit code {exit_code}\n", "stderr")
+            status = "failed"
+        
+        # Update state file to indicate script finished
+        try:
+            set_script_running(None, False)
+        except Exception:
+            pass
+        
+        # Update execution log
+        if self.execution_id:
+            try:
+                db = get_database()
+                db.update_script_execution(
+                    self.project_name,
+                    self.execution_id,
+                    status,
+                    exit_code,
+                    stdout[-10000:] if len(stdout) > 10000 else stdout,  # Limit size
+                    stderr[-10000:] if len(stderr) > 10000 else stderr
+                )
+            except Exception:
+                pass
+    
+    def _stop_script(self):
+        """Stop the running script."""
+        if self.process:
+            self.process.terminate()
+            self._append_output("\n⚠ Script terminated by user\n", "stderr")
+            self.status_var.set("Terminated")
+            
+            # Update state file
+            try:
+                set_script_running(None, False)
+            except Exception:
+                pass
+            
+            if self.execution_id:
+                try:
+                    db = get_database()
+                    db.update_script_execution(
+                        self.project_name,
+                        self.execution_id,
+                        "cancelled",
+                        -1,
+                        "",
+                        "Terminated by user"
+                    )
+                except Exception:
+                    pass
+    
+    def _on_close(self):
+        """Handle window close."""
+        if self.process:
+            if messagebox.askyesno("Script Running", "A script is still running. Stop it?"):
+                self._stop_script()
+            else:
+                return
+        self.destroy()
 
 
 if __name__ == "__main__":

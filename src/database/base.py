@@ -495,3 +495,162 @@ class DatabaseBackend(ABC):
         Returns most recent messages that fit within max_tokens.
         """
         pass
+
+    # ==================== Script Operations ====================
+    
+    @abstractmethod
+    def register_script(
+        self,
+        project_name: str,
+        script_name: str,
+        script_type: str,
+        file_path: str,
+        description: str = "",
+        version: str = "1.0.0",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        """
+        Register a new script for a project.
+        
+        Args:
+            project_name: Name of the project
+            script_name: Display name for the script
+            script_type: Type of script (scraper, data-manipulation, ai-script, migration)
+            file_path: Relative path to script file within project
+            description: Description of what the script does
+            version: Version string (default: 1.0.0)
+            metadata: Additional metadata (dependencies, schedule, etc.)
+            
+        Returns:
+            ID of the registered script
+        """
+        pass
+    
+    @abstractmethod
+    def get_script(self, project_name: str, script_id: int) -> Optional[Dict[str, Any]]:
+        """Get a script by ID."""
+        pass
+    
+    @abstractmethod
+    def list_scripts(
+        self,
+        project_name: str,
+        script_type: Optional[str] = None,
+        enabled_only: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        List scripts for a project.
+        
+        Args:
+            project_name: Name of the project
+            script_type: Optional filter by script type
+            enabled_only: Only return enabled scripts (default: True)
+        """
+        pass
+    
+    @abstractmethod
+    def update_script(
+        self,
+        project_name: str,
+        script_id: int,
+        updates: Dict[str, Any]
+    ) -> bool:
+        """Update a script's properties."""
+        pass
+    
+    @abstractmethod
+    def delete_script(self, project_name: str, script_id: int) -> bool:
+        """Delete a script registration."""
+        pass
+    
+    @abstractmethod
+    def log_script_execution(
+        self,
+        project_name: str,
+        script_id: int,
+        status: str,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        """
+        Log a script execution.
+        
+        Args:
+            project_name: Name of the project
+            script_id: ID of the script
+            status: Execution status (running, success, failed, cancelled)
+            exit_code: Process exit code (if finished)
+            stdout: Standard output capture
+            stderr: Standard error capture
+            metadata: Additional execution metadata
+            
+        Returns:
+            ID of the execution log entry
+        """
+        pass
+    
+    @abstractmethod
+    def update_script_execution(
+        self,
+        project_name: str,
+        execution_id: int,
+        status: str,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None
+    ) -> bool:
+        """Update an existing execution log entry."""
+        pass
+    
+    @abstractmethod
+    def get_script_executions(
+        self,
+        project_name: str,
+        script_id: Optional[int] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Get execution logs for scripts.
+        
+        Args:
+            project_name: Name of the project
+            script_id: Optional filter by script ID
+            limit: Maximum number of entries to return
+        """
+        pass
+    
+    # ==================== Migration Operations ====================
+    
+    @abstractmethod
+    def get_applied_migrations(self, project_name: str) -> List[Dict[str, Any]]:
+        """Get list of applied migration versions."""
+        pass
+    
+    @abstractmethod
+    def record_migration(
+        self,
+        project_name: str,
+        version: str,
+        script_name: str,
+        checksum: Optional[str] = None
+    ) -> int:
+        """
+        Record that a migration has been applied.
+        
+        Args:
+            project_name: Name of the project
+            version: Migration version string
+            script_name: Name of the migration script
+            checksum: SHA-256 hash of script content
+            
+        Returns:
+            ID of the recorded migration
+        """
+        pass
+    
+    @abstractmethod
+    def get_scripts_directory(self, project_name: str) -> Optional[str]:
+        """Get the absolute path to the project's scripts directory."""
+        pass
